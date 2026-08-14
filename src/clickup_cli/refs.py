@@ -1,0 +1,56 @@
+"""Strict parsing for native ClickUp task IDs and task URLs."""
+
+from __future__ import annotations
+
+import re
+from urllib.parse import unquote, urlsplit
+
+from clickup_cli.errors import ReferenceError
+
+_TASK_ID = re.compile(r"[A-Za-z0-9_-]+\Z")
+
+
+def _valid_id(value: str) -> bool:
+    return bool(value and _TASK_ID.fullmatch(value))
+
+
+def parse_task_ref(reference: str) -> str:
+    """Return a native task ID from an ID or supported clickup.com URL."""
+
+    value = reference.strip()
+    if _valid_id(value):
+        return value
+
+    parsed = urlsplit(value)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not (
+        hostname == "clickup.com" or hostname.endswith(".clickup.com")
+    ):
+        raise ReferenceError("TASK_REF must be a native task ID or ClickUp task URL")
+    try:
+        has_port = parsed.port is not None
+    except ValueError as exc:
+        raise ReferenceError("ClickUp task URL contains an invalid port") from exc
+    if parsed.username is not None or parsed.password is not None or has_port:
+        raise ReferenceError("ClickUp task URL contains unsupported authority components")
+
+    segments = [unquote(segment) for segment in parsed.path.strip("/").split("/")]
+    if len(segments) == 2 and segments[0] == "t":
+        task_id = segments[1]
+    elif len(segments) == 3 and segments[0] == "t" and _valid_id(segments[1]):
+        task_id = segments[2]
+    else:
+        raise ReferenceError(
+            "ClickUp task URL must use /t/<task-id> or /t/<workspace-id>/<task-id>"
+        )
+    if not _valid_id(task_id):
+        raise ReferenceError("ClickUp task URL contains an invalid task ID")
+    return task_id
+
+
+def validate_native_id(value: str, *, label: str) -> str:
+    """Validate an ID used directly in an API path."""
+
+    if not _valid_id(value):
+        raise ReferenceError(f"{label} must contain only letters, numbers, underscores, or hyphens")
+    return value

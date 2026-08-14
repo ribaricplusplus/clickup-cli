@@ -1,0 +1,75 @@
+[build-system]
+requires = ["editables>=0.5,<1", "hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clickup-agent-cli"
+version = "0.1.0"
+description = "Deterministic ClickUp operations for humans and agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Bruno Ribaric" }]
+keywords = ["clickup", "cli", "automation", "agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.28.1,<1",
+  "typer>=0.26.0,<0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/ribaricplusplus/clickup-cli"
+Issues = "https://github.com/ribaricplusplus/clickup-cli/issues"
+
+[project.scripts]
+clickup = "clickup_cli.cli:main"
+cu = "clickup_cli.cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.13.0,<2",
+  "pytest>=8.3.5,<10",
+  "ruff>=0.11.0,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clickup_cli"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "live: opt-in test against a real sandbox list; never run in ordinary CI",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/clickup_cli/cli.py" = ["B008"]
+"tests/*" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+pretty = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_decorators = false
