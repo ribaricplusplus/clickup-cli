@@ -37,6 +37,18 @@ class InvalidStatusError(ClickUpCLIError):
     error_type = "invalid_status"
 
 
+class InvalidDueDateError(ClickUpCLIError):
+    """A requested due date is not an accepted ISO date or timestamp."""
+
+    error_type = "invalid_due_date"
+
+
+class InvalidOperationError(ClickUpCLIError):
+    """An operation input is unsafe or unsupported."""
+
+    error_type = "invalid_operation"
+
+
 class CompletionStatusError(ClickUpCLIError):
     """The task's home list has no semantic completion status."""
 

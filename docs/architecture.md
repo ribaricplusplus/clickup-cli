@@ -22,7 +22,9 @@ List ID again at the HTTP boundary, including calls made outside the CLI adapter
 
 `clickup_cli.domain.TaskService` owns task semantics. It discovers the task's home List, resolves
 canonical labels, selects semantic completion statuses, performs idempotence checks, sends minimal
-updates through the client, and verifies readbacks. This layer has no Typer dependency.
+updates through the client, and verifies readbacks. It also normalizes comments and assignees and
+parses date-only or timezone-aware due-date inputs without relying on the host timezone. This layer
+has no Typer dependency.
 
 `clickup_cli.cli` translates Typer inputs into core calls and translates results into stable text
 or JSON. Configuration is lazy, so a refused destructive command makes no HTTP request and does not
@@ -35,9 +37,10 @@ placing IDs into URL paths.
 
 ## Request determinism
 
-Every endpoint method constructs a new request body containing only supported supplied fields. A
-status mutation can only reach the HTTP write after task and List reads establish the exact
-canonical label. A successful write is not reported until a separate read confirms the label.
+Every endpoint method constructs a new request body containing only supported supplied fields.
+Status, due-date, and assignee mutations can reach the HTTP write only after the domain layer reads
+the state needed to validate or minimize them. Comment, task, due-date, status, and assignee writes
+are not reported as successful until a separate API read confirms the operation-specific invariant.
 
 The API version is hidden in the client. Commands and domain operations do not contain `/v2`, which
 keeps a future v3 endpoint or staged version migration local to the HTTP boundary.
@@ -50,7 +53,9 @@ An autouse socket guard rejects non-local connections. This makes the test an HT
 not an in-memory mock of httpx internals.
 
 The opt-in live test is a separate marked lifecycle check. It requires explicit enablement and a
-sandbox List, assigns a unique task name, and deletes the created task in a `finally` block.
+sandbox List, assigns a unique task name, exercises comments, both due-date modes, assignee deltas,
+status operations, and deletion, requires a post-delete HTTP 404, and retains a `finally` cleanup
+fallback.
 
 ## Future Hermes adapter
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any, cast
 
 import pytest
 
 from clickup_cli.client import ClickUpClient
+from clickup_cli.errors import InvalidOperationError
 from clickup_cli.errors import ReferenceError as TaskReferenceError
 from tests.conftest import MockClickUpAPI
 
@@ -105,11 +107,33 @@ def test_client_rejects_unsafe_path_ids_before_network(mock_api: MockClickUpAPI)
             lambda: client.get_task("../user"),
             lambda: client.get_list("../task"),
             lambda: client.update_task_status("../user", "done"),
+            lambda: client.get_task_comments("../user"),
+            lambda: client.create_task_comment("../user", "comment"),
+            lambda: client.update_task_due_date("../user", 1, due_date_time=True),
+            lambda: client.update_task_assignees("../user", add=[42], remove=[]),
             lambda: client.create_task("../task", "Synthetic task"),
             lambda: client.delete_task("../user"),
         )
         for operation in operations:
             with pytest.raises(TaskReferenceError):
+                operation()
+
+    assert mock_api.state.requests == []
+
+
+def test_client_rejects_invalid_operation_values_before_network(
+    mock_api: MockClickUpAPI,
+) -> None:
+    with ClickUpClient(token="client-auth", base_url=mock_api.base_url) as client:
+        operations: tuple[Callable[[], object], ...] = (
+            lambda: client.create_task_comment("task_123", "   "),
+            lambda: client.update_task_due_date("task_123", cast(Any, -1.5), due_date_time=True),
+            lambda: client.update_task_due_date("task_123", 1, due_date_time=None),
+            lambda: client.update_task_assignees("task_123", add=[cast(Any, "42")], remove=[]),
+            lambda: client.update_task_assignees("task_123", add=[42], remove=[42]),
+        )
+        for operation in operations:
+            with pytest.raises(InvalidOperationError):
                 operation()
 
     assert mock_api.state.requests == []

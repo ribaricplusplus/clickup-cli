@@ -78,6 +78,13 @@ clickup task show '<task-id-or-url>'
 clickup task status '<task-id-or-url>'
 clickup task set-status '<task-id-or-url>' 'In Progress'
 clickup task complete '<task-id-or-url>'
+clickup task comment list '<task-id-or-url>'
+clickup task comment add '<task-id-or-url>' 'A concise update'
+clickup task due-date set '<task-id-or-url>' 2030-01-02
+clickup task due-date set '<task-id-or-url>' 2030-01-02T15:04:05+01:00
+clickup task due-date clear '<task-id-or-url>'
+clickup task assign '<task-id-or-url>' 101
+clickup task unassign '<task-id-or-url>' 101
 clickup task create 'Investigate failure' --list-id '<list-id>'
 clickup task create 'Fix failure' --list-id '<list-id>' --description 'Reproduce first' \
   --status 'Open' --assignee 101 --assignee 202
@@ -92,6 +99,16 @@ https://app.clickup.com/t/<workspace-id>/<task-id>
 ```
 
 Delete refuses to make an API request unless `--yes` is present.
+
+Date-only due dates use `YYYY-MM-DD` and send `due_date_time: false`. Timed due dates must
+include `Z` or an explicit UTC offset; the CLI converts them to milliseconds and sends
+`due_date_time: true`. ClickUp can canonicalize the stored millisecond value for a date-only
+due date. The CLI verifies the returned UTC calendar date, reports ClickUp's read-back value as
+`due_date_ms`, and verifies timed values exactly.
+
+Comment creation always sends `notify_all: false`; ClickUp's ordinary notification rules still
+apply. Assignee commands accept ClickUp numeric user IDs and avoid a write when the requested
+membership is already present.
 
 ## Deterministic status behavior
 
@@ -142,6 +159,8 @@ version details into commands and domain logic.
 - The token comes only from the process environment or a non-executable dotenv file.
 - JSON writes include only the fields documented for each operation.
 - Status writes are list-validated, minimal, idempotent, and verified by readback.
+- Comment creation is verified by comment ID and exact text.
+- Due-date and assignee writes read first, send only the requested field delta, and read back.
 - Delete requires explicit confirmation and does no request otherwise.
 - HTTP timeouts are bounded. HTTP 429 honors both `Retry-After` and ClickUp's documented
   `X-RateLimit-Reset` timestamp with bounded delay and retry count.
@@ -171,9 +190,10 @@ uv build
 ### Opt-in live sandbox test
 
 The live test is skipped unless explicitly enabled. It requires a disposable sandbox List. It
-invokes every shipped operation through the CLI: identity, create, show, status, set-status,
-semantic completion, and guarded deletion. API read-backs verify each mutation, and a `finally`
-block provides fallback cleanup.
+invokes every shipped operation through the CLI: identity, create, show, comment add/list,
+date-only and timed due-date set/clear, assign/unassign, status, set-status, semantic completion,
+and guarded deletion. API read-backs verify each mutation, the normal path requires post-delete
+HTTP `404`, and a `finally` block provides fallback cleanup.
 
 ```console
 CLICKUP_LIVE_TEST=1 \
