@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import typer
 from typer._click.exceptions import ClickException
@@ -16,16 +16,29 @@ from typer.main import get_command
 from clickup_cli import __version__
 from clickup_cli.client import ClickUpClient
 from clickup_cli.config import DEFAULT_ENV_FILE, resolve_base_url, resolve_token
-from clickup_cli.domain import MutationResult, TaskService, summarize_task, task_status
+from clickup_cli.domain import (
+    AssignmentMutationResult,
+    CommentMutationResult,
+    DueDateMutationResult,
+    MutationResult,
+    TaskService,
+    parse_due_date,
+    summarize_task,
+    task_status,
+)
 from clickup_cli.errors import APIError, ClickUpCLIError, ConfirmationError
 from clickup_cli.refs import parse_task_ref, validate_native_id
-from clickup_cli.types import JsonObject
+from clickup_cli.types import JsonObject, JsonValue
 
 app = typer.Typer(no_args_is_help=True, help="Deterministic ClickUp operations.")
 auth_app = typer.Typer(no_args_is_help=True, help="Authentication inspection.")
 task_app = typer.Typer(no_args_is_help=True, help="Read and mutate ClickUp tasks.")
+comment_app = typer.Typer(no_args_is_help=True, help="List and add task comments.")
+due_date_app = typer.Typer(no_args_is_help=True, help="Set and clear task due dates.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(task_app, name="task")
+task_app.add_typer(comment_app, name="comment")
+task_app.add_typer(due_date_app, name="due-date")
 
 T = TypeVar("T")
 
@@ -97,6 +110,52 @@ def _mutation_text(result: MutationResult) -> str:
     if result.changed:
         return f"{result.task_id}: {result.previous_status} -> {result.status}"
     return f"{result.task_id}: already {result.status} (no change)"
+
+
+def _due_date_json(result: DueDateMutationResult) -> JsonObject:
+    return {
+        "changed": result.changed,
+        "due_date": result.due_date,
+        "due_date_ms": result.due_date_ms,
+        "due_date_time": result.due_date_time,
+        "previous_due_date_ms": result.previous_due_date_ms,
+        "task_id": result.task_id,
+    }
+
+
+def _due_date_text(result: DueDateMutationResult) -> str:
+    if result.due_date is None:
+        return (
+            f"{result.task_id}: due date cleared"
+            if result.changed
+            else f"{result.task_id}: already has no due date (no change)"
+        )
+    return (
+        f"{result.task_id}: due date set to {result.due_date}"
+        if result.changed
+        else f"{result.task_id}: already due {result.due_date} (no change)"
+    )
+
+
+def _assignment_json(result: AssignmentMutationResult) -> JsonObject:
+    return {
+        "assigned": result.assigned,
+        "assignee_ids": cast(list[JsonValue], result.assignee_ids),
+        "changed": result.changed,
+        "task_id": result.task_id,
+        "user_id": result.user_id,
+    }
+
+
+def _assignment_text(result: AssignmentMutationResult) -> str:
+    action = "assigned" if result.assigned else "unassigned"
+    if result.changed:
+        return f"{result.task_id}: {action} user {result.user_id}"
+    return f"{result.task_id}: user {result.user_id} already {action} (no change)"
+
+
+def _comment_json(result: CommentMutationResult) -> JsonObject:
+    return {"comment": result.comment, "task_id": result.task_id}
 
 
 def _version_callback(value: bool) -> None:
@@ -266,6 +325,131 @@ def complete_task(
         return _with_client(state, lambda client: TaskService(client).complete(task_id))
 
     _execute(state, operation, json_result=_mutation_json, text_result=_mutation_text)
+
+
+@comment_app.command("list")
+def list_comments(
+    context: typer.Context, task_ref: str = typer.Argument(..., metavar="TASK_REF")
+) -> None:
+    """List the latest task comments in a stable normalized shape."""
+
+    state = _state(context)
+
+    def operation() -> tuple[str, list[JsonObject]]:
+        task_id = parse_task_ref(task_ref)
+        comments = _with_client(state, lambda client: TaskService(client).list_comments(task_id))
+        return task_id, comments
+
+    def text(result: tuple[str, list[JsonObject]]) -> str:
+        comments = result[1]
+        if not comments:
+            return "No comments"
+        lines: list[str] = []
+        for comment in comments:
+            author = comment.get("username") or comment.get("user_id") or "unknown"
+            lines.append(f"{comment.get('id')} {author}: {comment.get('text') or ''}")
+        return "\n".join(lines)
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: {
+            "comments": cast(list[JsonValue], result[1]),
+            "task_id": result[0],
+        },
+        text_result=text,
+    )
+
+
+@comment_app.command("add")
+def add_comment(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    text: str = typer.Argument(..., metavar="TEXT"),
+) -> None:
+    """Add a plain-text task comment and verify it by readback."""
+
+    state = _state(context)
+
+    def operation() -> CommentMutationResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(state, lambda client: TaskService(client).add_comment(task_id, text))
+
+    _execute(
+        state,
+        operation,
+        json_result=_comment_json,
+        text_result=lambda result: f"Added comment {result.comment.get('id')} to {result.task_id}",
+    )
+
+
+@due_date_app.command("set")
+def set_due_date(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    due_at: str = typer.Argument(..., metavar="DUE_AT"),
+) -> None:
+    """Set YYYY-MM-DD or a timezone-aware ISO timestamp and verify readback."""
+
+    state = _state(context)
+
+    def operation() -> DueDateMutationResult:
+        task_id = parse_task_ref(task_ref)
+        requested = parse_due_date(due_at)
+        return _with_client(
+            state, lambda client: TaskService(client).set_due_date(task_id, requested)
+        )
+
+    _execute(state, operation, json_result=_due_date_json, text_result=_due_date_text)
+
+
+@due_date_app.command("clear")
+def clear_due_date(
+    context: typer.Context, task_ref: str = typer.Argument(..., metavar="TASK_REF")
+) -> None:
+    """Clear a task due date with a minimal update and verified readback."""
+
+    state = _state(context)
+
+    def operation() -> DueDateMutationResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(state, lambda client: TaskService(client).clear_due_date(task_id))
+
+    _execute(state, operation, json_result=_due_date_json, text_result=_due_date_text)
+
+
+@task_app.command("assign")
+def assign_task(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    user_id: int = typer.Argument(..., metavar="USER_ID"),
+) -> None:
+    """Assign one user with an idempotent minimal update and verified readback."""
+
+    state = _state(context)
+
+    def operation() -> AssignmentMutationResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(state, lambda client: TaskService(client).assign(task_id, user_id))
+
+    _execute(state, operation, json_result=_assignment_json, text_result=_assignment_text)
+
+
+@task_app.command("unassign")
+def unassign_task(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    user_id: int = typer.Argument(..., metavar="USER_ID"),
+) -> None:
+    """Unassign one user with an idempotent minimal update and verified readback."""
+
+    state = _state(context)
+
+    def operation() -> AssignmentMutationResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(state, lambda client: TaskService(client).unassign(task_id, user_id))
+
+    _execute(state, operation, json_result=_assignment_json, text_result=_assignment_text)
 
 
 @task_app.command("create")

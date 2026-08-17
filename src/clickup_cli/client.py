@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from clickup_cli.errors import APIError, TransportError
+from clickup_cli.errors import APIError, InvalidOperationError, TransportError
 from clickup_cli.refs import validate_native_id
 from clickup_cli.types import JsonObject
 
@@ -153,6 +153,63 @@ class ClickUpClient:
     def update_task_status(self, task_id: str, canonical_status: str) -> None:
         task_id = validate_native_id(task_id, label="TASK_ID")
         response = self._request("PUT", f"/task/{task_id}", json_body={"status": canonical_status})
+        response.close()
+
+    def get_task_comments(self, task_id: str) -> JsonObject:
+        task_id = validate_native_id(task_id, label="TASK_ID")
+        return self._object_response("GET", f"/task/{task_id}/comment")
+
+    def create_task_comment(self, task_id: str, comment_text: str) -> JsonObject:
+        task_id = validate_native_id(task_id, label="TASK_ID")
+        if not isinstance(comment_text, str) or not comment_text.strip():
+            raise InvalidOperationError("Comment text cannot be empty")
+        return self._object_response(
+            "POST",
+            f"/task/{task_id}/comment",
+            json_body={"comment_text": comment_text, "notify_all": False},
+        )
+
+    def update_task_due_date(
+        self,
+        task_id: str,
+        due_date_ms: int | None,
+        *,
+        due_date_time: bool | None = None,
+    ) -> None:
+        task_id = validate_native_id(task_id, label="TASK_ID")
+        if due_date_ms is None:
+            body: JsonObject = {"due_date": None}
+        else:
+            if not isinstance(due_date_ms, int) or isinstance(due_date_ms, bool) or due_date_ms < 0:
+                raise InvalidOperationError("Due date milliseconds must be a non-negative integer")
+            if not isinstance(due_date_time, bool):
+                raise InvalidOperationError("due_date_time is required when setting a due date")
+            body = {"due_date": due_date_ms, "due_date_time": due_date_time}
+        response = self._request("PUT", f"/task/{task_id}", json_body=body)
+        response.close()
+
+    def update_task_assignees(
+        self,
+        task_id: str,
+        *,
+        add: list[int],
+        remove: list[int],
+    ) -> None:
+        task_id = validate_native_id(task_id, label="TASK_ID")
+        if not add and not remove:
+            raise InvalidOperationError("An assignee update must add or remove at least one user")
+        if any(
+            not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0
+            for user_id in [*add, *remove]
+        ):
+            raise InvalidOperationError("Assignee IDs must be positive integers")
+        if set(add) & set(remove):
+            raise InvalidOperationError("The same user cannot be added and removed together")
+        response = self._request(
+            "PUT",
+            f"/task/{task_id}",
+            json_body={"assignees": {"add": list(add), "rem": list(remove)}},
+        )
         response.close()
 
     def create_task(
