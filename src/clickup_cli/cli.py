@@ -66,8 +66,10 @@ def _emit_json(payload: JsonObject, *, error: bool = False) -> None:
 
 def _fail(state: AppState, error: ClickUpCLIError) -> None:
     if state.json_output:
+        error_payload: JsonObject = {"message": str(error), "type": error.error_type}
+        error_payload.update(error.details)
         _emit_json(
-            {"error": {"message": str(error), "type": error.error_type}, "ok": False},
+            {"error": error_payload, "ok": False},
             error=True,
         )
     else:

@@ -72,7 +72,10 @@ Task creation accepts the same validated date-only or timezone-aware due-date mo
 command and repeatable, normalized tag names. The initial POST includes all requested fields so the
 operation does not require follow-up mutation calls. A separate `GET /task/{task_id}` then verifies
 the returned ID, destination List, name, description, status, requested assignees, requested tags,
-and due date before success is reported.
+and due date before success is reported. Final stable-output normalization stays inside the same
+partial-outcome boundary. If the POST response is lost or unusable before an ID is known, the CLI
+returns `outcome_unknown` and instructs callers to inspect the List before retrying. Any failure
+after an ID is known returns `created_but_unverified` with a structured `task_id`.
 
 ## Live probe
 

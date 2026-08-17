@@ -44,7 +44,9 @@ Status, due-date, and assignee mutations can reach the HTTP write only after the
 the state needed to validate or minimize them. Comment, task, due-date, status, and assignee writes
 are not reported as successful until a separate API read confirms the operation-specific invariant.
 Create fields that belong in the initial POST, including due dates and tags, are sent atomically and
-then verified rather than being applied as follow-up patches.
+then verified and normalized rather than being applied as follow-up patches. Create failures
+distinguish an unknown POST outcome from a known task that could not be verified; the latter carries
+a structured task ID for inspection and live-test cleanup.
 
 The API version is hidden in the client. Commands and domain operations do not contain `/v2`, which
 keeps a future v3 endpoint or staged version migration local to the HTTP boundary.

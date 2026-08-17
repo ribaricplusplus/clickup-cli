@@ -13,9 +13,12 @@ from clickup_cli.errors import (
     ClickUpCLIError,
     CommentNotFoundError,
     CompletionStatusError,
+    CreatedButUnverifiedError,
     InvalidDueDateError,
     InvalidOperationError,
     InvalidStatusError,
+    OutcomeUnknownError,
+    TransportError,
     VerificationError,
 )
 from clickup_cli.refs import validate_native_id
@@ -102,10 +105,14 @@ def _optional_string(value: JsonValue | None) -> str | None:
     return str(value) if isinstance(value, (str, int)) and not isinstance(value, bool) else None
 
 
-def _timestamp_ms(value: datetime) -> int:
-    normalized = value.astimezone(UTC)
+def _normalized_timestamp_ms(value: datetime) -> tuple[datetime, int]:
+    try:
+        normalized = value.astimezone(UTC)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise InvalidDueDateError("Due date falls outside the supported UTC range") from exc
     delta = normalized - _EPOCH
-    return delta.days * 86_400_000 + delta.seconds * 1_000 + delta.microseconds // 1_000
+    milliseconds = delta.days * 86_400_000 + delta.seconds * 1_000 + delta.microseconds // 1_000
+    return normalized, milliseconds
 
 
 def _utc_date_from_ms(milliseconds: int) -> str:
@@ -136,7 +143,7 @@ def parse_due_date(value: str) -> DueDateInput:
                 "Due date must be YYYY-MM-DD or an ISO 8601 timestamp with Z or an offset"
             ) from exc
         parsed = datetime.combine(parsed_date, datetime.min.time(), tzinfo=UTC)
-        milliseconds = _timestamp_ms(parsed)
+        _, milliseconds = _normalized_timestamp_ms(parsed)
         if milliseconds < 0:
             raise InvalidDueDateError("Due date must not be before 1970-01-01")
         return DueDateInput(
@@ -152,16 +159,16 @@ def parse_due_date(value: str) -> DueDateInput:
     iso_value = f"{requested[:-1]}+00:00" if requested.endswith("Z") else requested
     try:
         parsed_datetime = datetime.fromisoformat(iso_value)
-    except ValueError as exc:
+        offset = parsed_datetime.utcoffset()
+    except (OverflowError, ValueError) as exc:
         raise InvalidDueDateError("Due date contains an invalid ISO 8601 timestamp") from exc
-    if parsed_datetime.utcoffset() is None:
+    if offset is None:
         raise InvalidDueDateError("Timed due dates require Z or an explicit UTC offset")
     if parsed_datetime.microsecond % 1_000:
         raise InvalidDueDateError("Timed due dates support at most millisecond precision")
-    milliseconds = _timestamp_ms(parsed_datetime)
+    normalized, milliseconds = _normalized_timestamp_ms(parsed_datetime)
     if milliseconds < 0:
         raise InvalidDueDateError("Due date must not be before 1970-01-01")
-    normalized = parsed_datetime.astimezone(UTC)
     timespec = "milliseconds" if normalized.microsecond else "seconds"
     display = normalized.isoformat(timespec=timespec).replace("+00:00", "Z")
     return DueDateInput(milliseconds=milliseconds, display=display, has_time=True)
@@ -504,22 +511,45 @@ class TaskService:
             raise InvalidOperationError("Assignee IDs must be positive integers")
         normalized_tags = normalize_tags(tags)
 
-        created = self._client.create_task(
-            list_id,
-            normalized_name,
-            description=description,
-            status=normalized_status,
-            assignees=normalized_assignees,
-            due_date=due_date.milliseconds if due_date is not None else None,
-            due_date_time=due_date.has_time if due_date is not None else None,
-            tags=normalized_tags,
-        )
-        task_id = _required_string(created.get("id"), label="created task ID")
+        try:
+            created = self._client.create_task(
+                list_id,
+                normalized_name,
+                description=description,
+                status=normalized_status,
+                assignees=normalized_assignees,
+                due_date=due_date.milliseconds if due_date is not None else None,
+                due_date_time=due_date.has_time if due_date is not None else None,
+                tags=normalized_tags,
+            )
+            task_id = _required_string(created.get("id"), label="created task ID")
+        except TransportError as exc:
+            raise OutcomeUnknownError(
+                "Task creation outcome is unknown because ClickUp did not return a task ID; "
+                "check the destination List before retrying",
+                details={"list_id": list_id, "task_name": normalized_name},
+            ) from exc
+        except APIError as exc:
+            status_code = exc.status_code
+            ambiguous = (
+                status_code is None
+                or status_code == 408
+                or status_code >= 500
+                or 200 <= status_code < 300
+            )
+            if ambiguous:
+                raise OutcomeUnknownError(
+                    "Task creation outcome is unknown because ClickUp did not return a usable "
+                    "task ID; check the destination List before retrying",
+                    details={"list_id": list_id, "task_name": normalized_name},
+                ) from exc
+            raise
         try:
             readback = self._client.get_task(task_id)
         except ClickUpCLIError as exc:
-            raise VerificationError(
-                f"Task {task_id} was created but readback failed: {exc}"
+            raise CreatedButUnverifiedError(
+                "Task was created but its readback failed; inspect it before retrying: " + str(exc),
+                details={"task_id": task_id},
             ) from exc
         try:
             self._verify_created_task(
@@ -533,9 +563,12 @@ class TaskService:
                 due_date=due_date,
                 tags=normalized_tags,
             )
+            summarize_task(readback)
         except ClickUpCLIError as exc:
-            raise VerificationError(
-                f"Task {task_id} was created but verification failed: {exc}"
+            raise CreatedButUnverifiedError(
+                "Task was created but final verification failed; inspect it before retrying: "
+                + str(exc),
+                details={"task_id": task_id},
             ) from exc
         return readback
 

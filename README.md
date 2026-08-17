@@ -157,6 +157,15 @@ failures use exit code 2. With `--json`, both use this machine-readable form:
 {"error":{"message":"concise explanation","type":"invalid_status"},"ok":false}
 ```
 
+Task creation has two explicit partial-outcome errors. `outcome_unknown` means ClickUp did not
+return a task ID after a non-idempotent POST, so callers must inspect the destination List before
+retrying. `created_but_unverified` includes a structured `task_id` for a task that was created but
+could not be fully read back, verified, or normalized:
+
+```json
+{"error":{"message":"inspect it before retrying","task_id":"<task-id>","type":"created_but_unverified"},"ok":false}
+```
+
 Task results use the stable fields `id`, `name`, `description`, `status`, `status_type`, `list_id`,
 `list_name`, `due_date`, `due_date_ms`, `due_date_time`, `assignees`, `tags`, and `url`. Assignee
 entries contain stable `id`, `username`, and `email` fields. Missing scalar API fields are
@@ -177,8 +186,9 @@ version details into commands and domain logic.
 - Comment creation is verified by comment ID and exact text.
 - Due-date and assignee writes read first, send only the requested field delta, and read back.
 - Task creation sends due dates and tags in the original POST, then separately reads the task and
-  verifies its ID, List, name, and every explicitly supplied supported field. If that readback fails,
-  the error includes the already-created task ID so the partial outcome is explicit.
+  verifies and normalizes its ID, List, name, and every explicitly supplied supported field. A lost
+  POST response reports `outcome_unknown`; failures after receiving an ID report
+  `created_but_unverified` with that structured `task_id`.
 - Delete requires explicit confirmation and does no request otherwise.
 - HTTP timeouts are bounded. HTTP 429 honors both `Retry-After` and ClickUp's documented
   `X-RateLimit-Reset` timestamp with bounded delay and retry count.
@@ -212,7 +222,7 @@ existing Workspace tag that may be attached to its temporary task. It invokes ev
 operation through the CLI: identity, create with assignee/due-date/tag fields, rich show, comment
 add/list/show, date-only and timed due-date set/clear, assign/unassign, status, set-status, semantic
 completion, and guarded deletion. API read-backs verify each mutation, the normal path requires
-post-delete HTTP `404`, and a `finally` block provides fallback cleanup.
+post-delete HTTP `404`, and a `finally` block captures partial-create task IDs for fallback cleanup.
 
 ```console
 CLICKUP_LIVE_TEST=1 \

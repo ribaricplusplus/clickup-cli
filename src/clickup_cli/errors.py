@@ -1,10 +1,18 @@
 """Public error types with concise, credential-safe messages."""
 
+from typing import TypeAlias
+
+ErrorDetail: TypeAlias = str | int | float | bool | None
+
 
 class ClickUpCLIError(Exception):
     """Base class for expected application errors."""
 
     error_type = "clickup_error"
+
+    def __init__(self, message: str, *, details: dict[str, ErrorDetail] | None = None) -> None:
+        super().__init__(message)
+        self.details = dict(details or {})
 
 
 class ConfigurationError(ClickUpCLIError):
@@ -24,11 +32,33 @@ class APIError(ClickUpCLIError):
 
     error_type = "api_error"
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        details: dict[str, ErrorDetail] | None = None,
+    ) -> None:
+        super().__init__(message, details=details)
+        self.status_code = status_code
+
 
 class TransportError(ClickUpCLIError):
     """The ClickUp endpoint could not be reached."""
 
     error_type = "transport_error"
+
+
+class OutcomeUnknownError(ClickUpCLIError):
+    """A non-idempotent write may have succeeded before its response was lost."""
+
+    error_type = "outcome_unknown"
+
+
+class CreatedButUnverifiedError(ClickUpCLIError):
+    """A created task ID is known, but final verification or normalization failed."""
+
+    error_type = "created_but_unverified"
 
 
 class InvalidStatusError(ClickUpCLIError):

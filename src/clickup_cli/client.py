@@ -119,7 +119,10 @@ class ClickUpClient:
             safe_message = self._redact(message)
             status_code = response.status_code
             response.close()
-            raise APIError(f"ClickUp API returned HTTP {status_code}: {safe_message}")
+            raise APIError(
+                f"ClickUp API returned HTTP {status_code}: {safe_message}",
+                status_code=status_code,
+            )
         return response
 
     def _object_response(
@@ -130,14 +133,15 @@ class ClickUpClient:
         json_body: JsonObject | None = None,
     ) -> JsonObject:
         response = self._request(method, path, json_body=json_body)
+        status_code = response.status_code
         try:
             payload: Any = response.json()
         except ValueError as exc:
-            raise APIError("ClickUp API returned invalid JSON") from exc
+            raise APIError("ClickUp API returned invalid JSON", status_code=status_code) from exc
         finally:
             response.close()
         if not isinstance(payload, dict):
-            raise APIError("ClickUp API returned an unexpected JSON shape")
+            raise APIError("ClickUp API returned an unexpected JSON shape", status_code=status_code)
         return payload
 
     def get_user(self) -> JsonObject:

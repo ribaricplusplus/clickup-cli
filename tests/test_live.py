@@ -25,11 +25,20 @@ from clickup_cli.errors import APIError
 pytestmark = pytest.mark.live
 
 
-def _invoke(runner: CliRunner, base_url: str, *args: str) -> dict[str, Any]:
+def _invoke(
+    runner: CliRunner,
+    base_url: str,
+    *args: str,
+    error_task_ids: set[str] | None = None,
+) -> dict[str, Any]:
     result = runner.invoke(
         app,
         ["--base-url", base_url, "--json", *args],
     )
+    if result.exit_code != 0 and error_task_ids is not None and result.stderr:
+        error_payload = json.loads(result.stderr).get("error")
+        if isinstance(error_payload, dict) and isinstance(error_payload.get("task_id"), str):
+            error_task_ids.add(str(error_payload["task_id"]))
     assert result.exit_code == 0, result.output
     payload: dict[str, Any] = json.loads(result.stdout)
     assert payload["ok"] is True
@@ -53,6 +62,7 @@ def test_live_sandbox_cli_lifecycle() -> None:
     base_url = resolve_base_url(None)
     runner = CliRunner()
     task_id: str | None = None
+    cleanup_task_ids: set[str] = set()
     run_id = uuid.uuid4()
 
     with ClickUpClient(token=token, base_url=base_url) as client:
@@ -77,8 +87,10 @@ def test_live_sandbox_cli_lifecycle() -> None:
                 "2029-12-31",
                 "--tag",
                 tag_name,
+                error_task_ids=cleanup_task_ids,
             )
             task_id = str(created["task"]["id"])
+            cleanup_task_ids.add(task_id)
 
             shown = _invoke(runner, base_url, "task", "show", task_id)
             assert shown["task"]["id"] == task_id
@@ -230,11 +242,12 @@ def test_live_sandbox_cli_lifecycle() -> None:
             with pytest.raises(APIError, match="HTTP 404"):
                 client.get_task(task_id)
             print(f"live_cleanup task_id={task_id} post_delete=HTTP_404")
+            cleanup_task_ids.discard(task_id)
             task_id = None
         finally:
-            if task_id is not None:
+            for cleanup_task_id in sorted(cleanup_task_ids):
                 try:
-                    client.delete_task(task_id)
+                    client.delete_task(cleanup_task_id)
                 except APIError as exc:
                     if "HTTP 404" not in str(exc):
                         raise

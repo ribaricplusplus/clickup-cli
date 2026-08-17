@@ -23,6 +23,9 @@ Changelog, and the project intends to use Semantic Versioning.
   request and verified with all other explicitly supplied fields by task readback.
 - Rich task show output for due dates, assignees, tags, and List names.
 - Paginated `task comment show` lookup by ClickUp deep link or explicit comment ID.
+- Structured `outcome_unknown` and `created_but_unverified` task-creation errors that prevent blind
+  retries and preserve known task IDs after partial outcomes.
+- Stable invalid-due-date errors for UTC-normalization boundary overflows.
 - Confirmation-gated deletion.
 - Localhost HTTP contract suite and explicitly gated live sandbox lifecycle test covering comments,
   due dates, assignments, status operations, deletion, and post-delete HTTP 404.

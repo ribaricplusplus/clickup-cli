@@ -191,15 +191,86 @@ def test_create_accepts_date_only_due_date_and_repeatable_tags_then_reads_back(
     ]
 
 
-def test_create_rejects_invalid_due_date_before_network(mock_api: MockClickUpAPI) -> None:
+@pytest.mark.parametrize(
+    "invalid_due_date",
+    [
+        "tomorrow",
+        "0001-01-01T00:00:00+23:59",
+        "9999-12-31T23:59:59-23:59",
+    ],
+)
+def test_create_rejects_invalid_due_date_before_network(
+    mock_api: MockClickUpAPI, invalid_due_date: str
+) -> None:
     result = invoke(
         mock_api,
-        ["task", "create", "Task", "--list-id", LIST_ID, "--due-date", "tomorrow"],
+        ["task", "create", "Task", "--list-id", LIST_ID, "--due-date", invalid_due_date],
     )
 
     assert result.exit_code == 1
     assert json.loads(result.stderr)["error"]["type"] == "invalid_due_date"
     assert mock_api.state.requests == []
+
+
+def test_create_reports_unknown_outcome_when_post_response_is_lost(
+    mock_api: MockClickUpAPI,
+) -> None:
+    mock_api.expect(
+        "POST",
+        f"/api/v2/list/{LIST_ID}/task",
+        headers=WRITE_HEADERS,
+        json_body={"name": "Maybe created"},
+        disconnect=True,
+    )
+
+    result = invoke(
+        mock_api,
+        ["task", "create", "Maybe created", "--list-id", LIST_ID],
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error == {
+        "list_id": LIST_ID,
+        "message": (
+            "Task creation outcome is unknown because ClickUp did not return a task ID; "
+            "check the destination List before retrying"
+        ),
+        "task_name": "Maybe created",
+        "type": "outcome_unknown",
+    }
+
+
+@pytest.mark.parametrize(
+    ("response_status", "response_json", "expected_type"),
+    [
+        (200, {}, "outcome_unknown"),
+        (400, {"err": "invalid request"}, "api_error"),
+        (503, {"err": "temporarily unavailable"}, "outcome_unknown"),
+    ],
+)
+def test_create_classifies_api_failures_before_a_task_id(
+    mock_api: MockClickUpAPI,
+    response_status: int,
+    response_json: dict[str, str],
+    expected_type: str,
+) -> None:
+    mock_api.expect(
+        "POST",
+        f"/api/v2/list/{LIST_ID}/task",
+        headers=WRITE_HEADERS,
+        json_body={"name": "Maybe created"},
+        response_status=response_status,
+        response_json=response_json,
+    )
+
+    result = invoke(
+        mock_api,
+        ["task", "create", "Maybe created", "--list-id", LIST_ID],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["error"]["type"] == expected_type
 
 
 def test_create_rejects_empty_tag_before_network(mock_api: MockClickUpAPI) -> None:
@@ -238,8 +309,9 @@ def test_create_fails_when_readback_does_not_contain_requested_tag(
     )
 
     assert result.exit_code == 1
-    assert json.loads(result.stderr)["error"]["type"] == "verification_failed"
-    assert TASK_ID in result.stderr
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "created_but_unverified"
+    assert error["task_id"] == TASK_ID
     assert "tags" in result.stderr
 
 
@@ -266,9 +338,41 @@ def test_create_reports_created_task_id_when_readback_fails(mock_api: MockClickU
 
     assert result.exit_code == 1
     error = json.loads(result.stderr)["error"]
-    assert error["type"] == "verification_failed"
-    assert TASK_ID in error["message"]
+    assert error["type"] == "created_but_unverified"
+    assert error["task_id"] == TASK_ID
     assert "readback failed" in error["message"]
+
+
+def test_create_preserves_task_id_when_final_normalization_fails(
+    mock_api: MockClickUpAPI,
+) -> None:
+    mock_api.expect(
+        "POST",
+        f"/api/v2/list/{LIST_ID}/task",
+        headers=WRITE_HEADERS,
+        json_body={"name": "Malformed readback"},
+        response_json={"id": TASK_ID},
+    )
+    readback = task_payload()
+    readback["name"] = "Malformed readback"
+    readback["due_date"] = "not-milliseconds"
+    mock_api.expect(
+        "GET",
+        f"/api/v2/task/{TASK_ID}",
+        headers=READ_HEADERS,
+        response_json=readback,
+    )
+
+    result = invoke(
+        mock_api,
+        ["task", "create", "Malformed readback", "--list-id", LIST_ID],
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "created_but_unverified"
+    assert error["task_id"] == TASK_ID
+    assert "invalid due date" in error["message"]
 
 
 def test_comment_show_accepts_clickup_deep_link(mock_api: MockClickUpAPI) -> None:
