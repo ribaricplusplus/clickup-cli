@@ -49,6 +49,12 @@ class InvalidOperationError(ClickUpCLIError):
     error_type = "invalid_operation"
 
 
+class CommentNotFoundError(ClickUpCLIError):
+    """A requested comment is not present in the task's comment history."""
+
+    error_type = "comment_not_found"
+
+
 class CompletionStatusError(ClickUpCLIError):
     """The task's home list has no semantic completion status."""
 

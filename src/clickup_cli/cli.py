@@ -27,13 +27,13 @@ from clickup_cli.domain import (
     task_status,
 )
 from clickup_cli.errors import APIError, ClickUpCLIError, ConfirmationError
-from clickup_cli.refs import parse_task_ref, validate_native_id
+from clickup_cli.refs import parse_comment_ref, parse_task_ref, validate_native_id
 from clickup_cli.types import JsonObject, JsonValue
 
 app = typer.Typer(no_args_is_help=True, help="Deterministic ClickUp operations.")
 auth_app = typer.Typer(no_args_is_help=True, help="Authentication inspection.")
 task_app = typer.Typer(no_args_is_help=True, help="Read and mutate ClickUp tasks.")
-comment_app = typer.Typer(no_args_is_help=True, help="List and add task comments.")
+comment_app = typer.Typer(no_args_is_help=True, help="Show, list, and add task comments.")
 due_date_app = typer.Typer(no_args_is_help=True, help="Set and clear task due dates.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(task_app, name="task")
@@ -256,12 +256,25 @@ def show_task(
         return summarize_task(task)
 
     def text(task: JsonObject) -> str:
+        raw_assignees = task.get("assignees")
+        assignee_labels: list[str] = []
+        if isinstance(raw_assignees, list):
+            for raw_assignee in raw_assignees:
+                if isinstance(raw_assignee, dict):
+                    label = raw_assignee.get("username") or raw_assignee.get("id")
+                    if label is not None:
+                        assignee_labels.append(str(label))
+        raw_tags = task.get("tags")
+        tag_labels = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
         return "\n".join(
             (
                 f"ID: {task.get('id') or ''}",
                 f"Name: {task.get('name') or ''}",
                 f"Status: {task.get('status') or ''}",
-                f"List: {task.get('list_id') or ''}",
+                f"List: {task.get('list_name') or task.get('list_id') or ''}",
+                f"Due: {task.get('due_date') or ''}",
+                f"Assignees: {', '.join(assignee_labels)}",
+                f"Tags: {', '.join(tag_labels)}",
                 f"URL: {task.get('url') or ''}",
             )
         )
@@ -325,6 +338,30 @@ def complete_task(
         return _with_client(state, lambda client: TaskService(client).complete(task_id))
 
     _execute(state, operation, json_result=_mutation_json, text_result=_mutation_text)
+
+
+@comment_app.command("show")
+def show_comment(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    comment_id: str | None = typer.Argument(None, metavar="COMMENT_ID"),
+) -> None:
+    """Show one comment by explicit ID or directly from a ClickUp comment URL."""
+
+    state = _state(context)
+
+    def operation() -> CommentMutationResult:
+        task_id, native_comment_id = parse_comment_ref(task_ref, comment_id)
+        return _with_client(
+            state,
+            lambda client: TaskService(client).get_comment(task_id, native_comment_id),
+        )
+
+    def text(result: CommentMutationResult) -> str:
+        author = result.comment.get("username") or result.comment.get("user_id") or "unknown"
+        return f"{result.comment.get('id')} {author}: {result.comment.get('text') or ''}"
+
+    _execute(state, operation, json_result=_comment_json, text_result=text)
 
 
 @comment_app.command("list")
@@ -460,21 +497,31 @@ def create_task(
     description: str | None = typer.Option(None, "--description"),
     status: str | None = typer.Option(None, "--status"),
     assignees: list[int] | None = typer.Option(None, "--assignee", metavar="USER_ID"),
+    due_at: str | None = typer.Option(
+        None,
+        "--due-date",
+        metavar="DUE_AT",
+        help="YYYY-MM-DD or timezone-aware ISO 8601 timestamp.",
+    ),
+    tags: list[str] | None = typer.Option(None, "--tag", metavar="TAG"),
 ) -> None:
-    """Create a task with only explicitly supplied supported fields."""
+    """Create and read back a task with only explicitly supplied supported fields."""
 
     state = _state(context)
 
     def operation() -> JsonObject:
         native_list_id = validate_native_id(list_id, label="LIST_ID")
+        requested_due_date = parse_due_date(due_at) if due_at is not None else None
         task = _with_client(
             state,
-            lambda client: client.create_task(
+            lambda client: TaskService(client).create_task(
                 native_list_id,
                 name,
                 description=description,
                 status=status,
                 assignees=assignees,
+                due_date=requested_due_date,
+                tags=tags,
             ),
         )
         return summarize_task(task)

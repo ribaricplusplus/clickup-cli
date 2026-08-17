@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -155,9 +156,23 @@ class ClickUpClient:
         response = self._request("PUT", f"/task/{task_id}", json_body={"status": canonical_status})
         response.close()
 
-    def get_task_comments(self, task_id: str) -> JsonObject:
+    def get_task_comments(
+        self,
+        task_id: str,
+        *,
+        start: int | None = None,
+        start_id: str | None = None,
+    ) -> JsonObject:
         task_id = validate_native_id(task_id, label="TASK_ID")
-        return self._object_response("GET", f"/task/{task_id}/comment")
+        if (start is None) != (start_id is None):
+            raise InvalidOperationError("start and start_id must be provided together")
+        path = f"/task/{task_id}/comment"
+        if start is not None and start_id is not None:
+            if isinstance(start, bool) or not isinstance(start, int) or start < 0:
+                raise InvalidOperationError("start must be a non-negative integer")
+            start_id = validate_native_id(start_id, label="START_ID")
+            path = f"{path}?{urlencode({'start': start, 'start_id': start_id})}"
+        return self._object_response("GET", path)
 
     def create_task_comment(self, task_id: str, comment_text: str) -> JsonObject:
         task_id = validate_native_id(task_id, label="TASK_ID")
@@ -220,15 +235,38 @@ class ClickUpClient:
         description: str | None = None,
         status: str | None = None,
         assignees: list[int] | None = None,
+        due_date: int | None = None,
+        due_date_time: bool | None = None,
+        tags: list[str] | None = None,
     ) -> JsonObject:
         list_id = validate_native_id(list_id, label="LIST_ID")
+        if not isinstance(name, str) or not name.strip():
+            raise InvalidOperationError("Task name cannot be empty")
         body: JsonObject = {"name": name}
         if description is not None:
             body["description"] = description
         if status is not None:
             body["status"] = status
         if assignees:
+            if any(
+                not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0
+                for user_id in assignees
+            ):
+                raise InvalidOperationError("Assignee IDs must be positive integers")
             body["assignees"] = list(assignees)
+        if due_date is not None:
+            if isinstance(due_date, bool) or not isinstance(due_date, int) or due_date < 0:
+                raise InvalidOperationError("due_date must be a non-negative integer")
+            if not isinstance(due_date_time, bool):
+                raise InvalidOperationError("due_date_time must be boolean when due_date is set")
+            body["due_date"] = due_date
+            body["due_date_time"] = due_date_time
+        elif due_date_time is not None:
+            raise InvalidOperationError("due_date_time cannot be set without due_date")
+        if tags:
+            if any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+                raise InvalidOperationError("Tags must be non-empty strings")
+            body["tags"] = list(tags)
         return self._object_response("POST", f"/list/{list_id}/task", json_body=body)
 
     def delete_task(self, task_id: str) -> None:

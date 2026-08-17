@@ -19,6 +19,10 @@ Changelog, and the project intends to use Semantic Versioning.
 - Date-only and timezone-aware due-date set/clear commands with ClickUp
   canonicalization-aware read-back checks.
 - Idempotent numeric assignee assign/unassign commands with minimal `add`/`rem` payloads.
+- Repeatable `task create --tag` and validated `--due-date` options, sent in the initial create
+  request and verified with all other explicitly supplied fields by task readback.
+- Rich task show output for due dates, assignees, tags, and List names.
+- Paginated `task comment show` lookup by ClickUp deep link or explicit comment ID.
 - Confirmation-gated deletion.
 - Localhost HTTP contract suite and explicitly gated live sandbox lifecycle test covering comments,
   due dates, assignments, status operations, deletion, and post-delete HTTP 404.

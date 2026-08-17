@@ -10,12 +10,15 @@ from typing import cast
 from clickup_cli.client import ClickUpClient
 from clickup_cli.errors import (
     APIError,
+    ClickUpCLIError,
+    CommentNotFoundError,
     CompletionStatusError,
     InvalidDueDateError,
     InvalidOperationError,
     InvalidStatusError,
     VerificationError,
 )
+from clickup_cli.refs import validate_native_id
 from clickup_cli.types import JsonObject, JsonValue
 
 _COMPLETION_LABELS = ("completed", "complete", "done", "closed")
@@ -25,6 +28,7 @@ _TIMED_DATE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_MAX_COMMENT_PAGES = 1_000
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,15 @@ def _utc_date_from_ms(milliseconds: int) -> str:
         return (_EPOCH + timedelta(milliseconds=milliseconds)).date().isoformat()
     except OverflowError as exc:
         raise APIError("ClickUp response contains an out-of-range due date") from exc
+
+
+def _utc_datetime_from_ms(milliseconds: int) -> str:
+    try:
+        parsed = _EPOCH + timedelta(milliseconds=milliseconds)
+    except OverflowError as exc:
+        raise APIError("ClickUp response contains an out-of-range due date") from exc
+    timespec = "milliseconds" if parsed.microsecond else "seconds"
+    return parsed.isoformat(timespec=timespec).replace("+00:00", "Z")
 
 
 def parse_due_date(value: str) -> DueDateInput:
@@ -204,6 +217,40 @@ def task_assignee_ids(task: JsonObject) -> list[int]:
     return sorted(identifiers)
 
 
+def task_tag_names(task: JsonObject) -> list[str]:
+    raw_tags = task.get("tags")
+    if not isinstance(raw_tags, list):
+        raise APIError("ClickUp response is missing task tags")
+    names: list[str] = []
+    for raw_tag in raw_tags:
+        if isinstance(raw_tag, str):
+            name = raw_tag
+        elif isinstance(raw_tag, dict) and isinstance(raw_tag.get("name"), str):
+            name = str(raw_tag["name"])
+        else:
+            raise APIError("ClickUp response contains an invalid task tag")
+        if not name:
+            raise APIError("ClickUp response contains an empty task tag")
+        names.append(name)
+    return names
+
+
+def normalize_tags(tags: list[str] | None) -> list[str]:
+    """Trim and case-insensitively deduplicate repeatable tag options."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_tag in tags or []:
+        if not isinstance(raw_tag, str) or not raw_tag.strip():
+            raise InvalidOperationError("Tags must be non-empty strings")
+        tag = raw_tag.strip()
+        key = tag.casefold()
+        if key not in seen:
+            seen.add(key)
+            normalized.append(tag)
+    return normalized
+
+
 def list_statuses(list_payload: JsonObject) -> list[StatusDefinition]:
     raw_statuses = list_payload.get("statuses")
     if not isinstance(raw_statuses, list):
@@ -234,21 +281,75 @@ def summarize_task(task: JsonObject) -> JsonObject:
         status_type = str(raw_type) if isinstance(raw_type, (str, int)) else None
     list_payload = task.get("list")
     list_id: JsonValue = None
+    list_name: JsonValue = None
     if isinstance(list_payload, dict):
         raw_list_id = list_payload.get("id")
+        raw_list_name = list_payload.get("name")
         list_id = str(raw_list_id) if isinstance(raw_list_id, (str, int)) else None
+        list_name = str(raw_list_name) if isinstance(raw_list_name, str) else None
+
+    assignees: JsonValue = None
+    raw_assignees = task.get("assignees")
+    if isinstance(raw_assignees, list):
+        normalized_assignees: list[JsonValue] = []
+        for raw_assignee in raw_assignees:
+            if not isinstance(raw_assignee, dict):
+                raise APIError("ClickUp response contains an invalid task assignee")
+            normalized_assignees.append(
+                {
+                    "email": (
+                        str(raw_assignee["email"])
+                        if isinstance(raw_assignee.get("email"), str)
+                        else None
+                    ),
+                    "id": _optional_string(raw_assignee.get("id")),
+                    "username": (
+                        str(raw_assignee["username"])
+                        if isinstance(raw_assignee.get("username"), str)
+                        else None
+                    ),
+                }
+            )
+        assignees = normalized_assignees
+
+    tags: JsonValue = None
+    raw_tags = task.get("tags")
+    if isinstance(raw_tags, list):
+        normalized_tags: list[JsonValue] = []
+        for raw_tag in raw_tags:
+            if isinstance(raw_tag, str):
+                normalized_tags.append(raw_tag)
+            elif isinstance(raw_tag, dict) and isinstance(raw_tag.get("name"), str):
+                normalized_tags.append(str(raw_tag["name"]))
+            else:
+                raise APIError("ClickUp response contains an invalid task tag")
+        tags = normalized_tags
+
+    due_date = task_due_date(task)
+    due_date_display: JsonValue = None
+    if due_date.milliseconds is not None:
+        if due_date.has_time is False:
+            due_date_display = _utc_date_from_ms(due_date.milliseconds)
+        else:
+            due_date_display = _utc_datetime_from_ms(due_date.milliseconds)
 
     raw_id = task.get("id")
     raw_name = task.get("name")
     raw_description = task.get("description")
     raw_url = task.get("url")
     return {
+        "assignees": assignees,
         "description": str(raw_description) if isinstance(raw_description, str) else None,
+        "due_date": due_date_display,
+        "due_date_ms": due_date.milliseconds,
+        "due_date_time": due_date.has_time,
         "id": str(raw_id) if isinstance(raw_id, (str, int)) else None,
         "list_id": list_id,
+        "list_name": list_name,
         "name": str(raw_name) if isinstance(raw_name, str) else None,
         "status": status_label,
         "status_type": status_type,
+        "tags": tags,
         "url": str(raw_url) if isinstance(raw_url, str) else None,
     }
 
@@ -313,6 +414,130 @@ class TaskService:
     @staticmethod
     def _labels(statuses: list[StatusDefinition]) -> str:
         return ", ".join(status.label for status in statuses)
+
+    @staticmethod
+    def _verify_due_date_state(requested: DueDateInput, observed: DueDateState) -> None:
+        value_matches = observed.milliseconds == requested.milliseconds
+        if not requested.has_time and observed.milliseconds is not None:
+            value_matches = _utc_date_from_ms(observed.milliseconds) == requested.display
+        if not value_matches:
+            received = (
+                _utc_date_from_ms(observed.milliseconds)
+                if not requested.has_time and observed.milliseconds is not None
+                else observed.milliseconds
+            )
+            raise VerificationError(
+                f"Due date verification failed: expected {requested.display}, received {received}"
+            )
+        if observed.has_time is not None and observed.has_time != requested.has_time:
+            raise VerificationError(
+                "Due date verification failed: "
+                f"expected due_date_time={requested.has_time}, received {observed.has_time}"
+            )
+
+    def _verify_created_task(
+        self,
+        task_id: str,
+        readback: JsonObject,
+        *,
+        list_id: str,
+        name: str,
+        description: str | None,
+        status: str | None,
+        assignees: list[int],
+        due_date: DueDateInput | None,
+        tags: list[str],
+    ) -> None:
+        observed_id = _required_string(readback.get("id"), label="created task readback ID")
+        if observed_id != task_id:
+            raise VerificationError(f"expected ID {task_id}, received {observed_id}")
+        observed_list_id = task_list_id(readback)
+        if observed_list_id != list_id:
+            raise VerificationError(f"expected List {list_id}, received {observed_list_id}")
+        observed_name = _required_string(readback.get("name"), label="created task name")
+        if observed_name != name:
+            raise VerificationError(f"expected name {name!r}, received {observed_name!r}")
+        if description is not None and readback.get("description") != description:
+            raise VerificationError("description did not match")
+        if status is not None:
+            observed_status = task_status(readback)
+            if observed_status.casefold() != status.casefold():
+                raise VerificationError(f"expected status {status!r}, received {observed_status!r}")
+        if assignees:
+            observed_assignees = set(task_assignee_ids(readback))
+            missing_assignees = sorted(set(assignees) - observed_assignees)
+            if missing_assignees:
+                raise VerificationError(
+                    "missing assignees " + ", ".join(str(user_id) for user_id in missing_assignees)
+                )
+        if tags:
+            observed_tags = {tag.casefold() for tag in task_tag_names(readback)}
+            missing_tags = [tag for tag in tags if tag.casefold() not in observed_tags]
+            if missing_tags:
+                raise VerificationError("missing tags " + ", ".join(missing_tags))
+        if due_date is not None:
+            self._verify_due_date_state(due_date, task_due_date(readback))
+
+    def create_task(
+        self,
+        list_id: str,
+        name: str,
+        *,
+        description: str | None = None,
+        status: str | None = None,
+        assignees: list[int] | None = None,
+        due_date: DueDateInput | None = None,
+        tags: list[str] | None = None,
+    ) -> JsonObject:
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise InvalidOperationError("Task name cannot be empty")
+        normalized_status = status.strip() if status is not None else None
+        if normalized_status == "":
+            raise InvalidOperationError("Task status cannot be empty")
+
+        normalized_assignees = sorted(set(assignees or []))
+        if any(
+            isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0
+            for user_id in normalized_assignees
+        ):
+            raise InvalidOperationError("Assignee IDs must be positive integers")
+        normalized_tags = normalize_tags(tags)
+
+        created = self._client.create_task(
+            list_id,
+            normalized_name,
+            description=description,
+            status=normalized_status,
+            assignees=normalized_assignees,
+            due_date=due_date.milliseconds if due_date is not None else None,
+            due_date_time=due_date.has_time if due_date is not None else None,
+            tags=normalized_tags,
+        )
+        task_id = _required_string(created.get("id"), label="created task ID")
+        try:
+            readback = self._client.get_task(task_id)
+        except ClickUpCLIError as exc:
+            raise VerificationError(
+                f"Task {task_id} was created but readback failed: {exc}"
+            ) from exc
+        try:
+            self._verify_created_task(
+                task_id,
+                readback,
+                list_id=list_id,
+                name=normalized_name,
+                description=description,
+                status=normalized_status,
+                assignees=normalized_assignees,
+                due_date=due_date,
+                tags=normalized_tags,
+            )
+        except ClickUpCLIError as exc:
+            raise VerificationError(
+                f"Task {task_id} was created but verification failed: {exc}"
+            ) from exc
+        return readback
 
     def _apply_status(
         self,
@@ -379,6 +604,46 @@ class TaskService:
 
     def list_comments(self, task_id: str) -> list[JsonObject]:
         return summarize_comments(self._client.get_task_comments(task_id))
+
+    def get_comment(self, task_id: str, comment_id: str) -> CommentMutationResult:
+        target_comment_id = validate_native_id(comment_id, label="COMMENT_ID")
+        start: int | None = None
+        start_id: str | None = None
+        seen_cursors: set[tuple[int, str]] = set()
+
+        for _ in range(_MAX_COMMENT_PAGES):
+            comments = summarize_comments(
+                self._client.get_task_comments(task_id, start=start, start_id=start_id)
+            )
+            match = next(
+                (comment for comment in comments if comment.get("id") == target_comment_id), None
+            )
+            if match is not None:
+                return CommentMutationResult(task_id=task_id, comment=match)
+            if not comments:
+                break
+
+            last_comment = comments[-1]
+            raw_date = last_comment.get("date")
+            raw_id = last_comment.get("id")
+            if not isinstance(raw_date, str) or not isinstance(raw_id, str):
+                raise APIError("ClickUp comment pagination response is missing a cursor")
+            try:
+                next_start = int(raw_date)
+            except ValueError as exc:
+                raise APIError("ClickUp comment pagination response has an invalid date") from exc
+            if next_start < 0 or str(next_start) != raw_date:
+                raise APIError("ClickUp comment pagination response has an invalid date")
+            next_start_id = validate_native_id(raw_id, label="START_ID")
+            cursor = (next_start, next_start_id)
+            if cursor in seen_cursors:
+                raise APIError("ClickUp comment pagination did not advance")
+            seen_cursors.add(cursor)
+            start, start_id = cursor
+        else:
+            raise APIError("ClickUp comment pagination exceeded the safety limit")
+
+        raise CommentNotFoundError(f"Comment {target_comment_id} was not found on task {task_id}")
 
     def add_comment(self, task_id: str, comment_text: str) -> CommentMutationResult:
         if not comment_text.strip():

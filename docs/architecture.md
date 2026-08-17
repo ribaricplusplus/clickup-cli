@@ -22,9 +22,11 @@ List ID again at the HTTP boundary, including calls made outside the CLI adapter
 
 `clickup_cli.domain.TaskService` owns task semantics. It discovers the task's home List, resolves
 canonical labels, selects semantic completion statuses, performs idempotence checks, sends minimal
-updates through the client, and verifies readbacks. It also normalizes comments and assignees and
-parses date-only or timezone-aware due-date inputs without relying on the host timezone. This layer
-has no Typer dependency.
+updates through the client, and verifies readbacks. It also normalizes comments, assignees, and
+tags; follows comment cursors for exact comment lookup; and parses date-only or timezone-aware
+due-date inputs without relying on the host timezone. Task creation is a domain operation so all
+explicitly requested fields can be verified by a separate task read. This layer has no Typer
+dependency.
 
 `clickup_cli.cli` translates Typer inputs into core calls and translates results into stable text
 or JSON. Configuration is lazy, so a refused destructive command makes no HTTP request and does not
@@ -33,7 +35,7 @@ remains machine-readable when arguments or typed options are invalid.
 
 `clickup_cli.config` reads process configuration and parses dotenv assignments as data. It does not
 execute, source, or interpolate shell content. `clickup_cli.refs` validates task references before
-placing IDs into URL paths.
+placing IDs into URL paths and extracts comment IDs only from validated ClickUp deep links.
 
 ## Request determinism
 
@@ -41,6 +43,8 @@ Every endpoint method constructs a new request body containing only supported su
 Status, due-date, and assignee mutations can reach the HTTP write only after the domain layer reads
 the state needed to validate or minimize them. Comment, task, due-date, status, and assignee writes
 are not reported as successful until a separate API read confirms the operation-specific invariant.
+Create fields that belong in the initial POST, including due dates and tags, are sent atomically and
+then verified rather than being applied as follow-up patches.
 
 The API version is hidden in the client. Commands and domain operations do not contain `/v2`, which
 keeps a future v3 endpoint or staged version migration local to the HTTP boundary.
@@ -53,9 +57,9 @@ An autouse socket guard rejects non-local connections. This makes the test an HT
 not an in-memory mock of httpx internals.
 
 The opt-in live test is a separate marked lifecycle check. It requires explicit enablement and a
-sandbox List, assigns a unique task name, exercises comments, both due-date modes, assignee deltas,
-status operations, and deletion, requires a post-delete HTTP 404, and retains a `finally` cleanup
-fallback.
+sandbox List plus an existing Workspace tag, assigns a unique task name, exercises rich creation and
+show output, comment deep-link lookup, both due-date modes, assignee deltas, status operations, and
+deletion, requires a post-delete HTTP 404, and retains a `finally` cleanup fallback.
 
 ## Future Hermes adapter
 

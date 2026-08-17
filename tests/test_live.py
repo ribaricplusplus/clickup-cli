@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -17,6 +18,7 @@ from clickup_cli.domain import (
     task_assignee_ids,
     task_due_date,
     task_status,
+    task_tag_names,
 )
 from clickup_cli.errors import APIError
 
@@ -41,10 +43,12 @@ def _invoke(runner: CliRunner, base_url: str, *args: str) -> dict[str, Any]:
 def test_live_sandbox_cli_lifecycle() -> None:
     token = os.environ.get("CLICKUP_API_TOKEN")
     list_id = os.environ.get("CLICKUP_TEST_LIST_ID")
-    if not token or not list_id:
-        pytest.fail("CLICKUP_API_TOKEN and CLICKUP_TEST_LIST_ID are required")
+    tag_name = os.environ.get("CLICKUP_TEST_TAG")
+    if not token or not list_id or not tag_name:
+        pytest.fail("CLICKUP_API_TOKEN, CLICKUP_TEST_LIST_ID, and CLICKUP_TEST_TAG are required")
     assert token is not None
     assert list_id is not None
+    assert tag_name is not None
 
     base_url = resolve_base_url(None)
     runner = CliRunner()
@@ -67,12 +71,32 @@ def test_live_sandbox_cli_lifecycle() -> None:
                 list_id,
                 "--description",
                 "Temporary task created by the opt-in live CLI test.",
+                "--assignee",
+                str(user_id),
+                "--due-date",
+                "2029-12-31",
+                "--tag",
+                tag_name,
             )
             task_id = str(created["task"]["id"])
 
             shown = _invoke(runner, base_url, "task", "show", task_id)
             assert shown["task"]["id"] == task_id
             assert shown["task"]["list_id"] == list_id
+            assert str(shown["task"]["due_date"]).startswith("2029-12-31")
+            assert any(assignee["id"] == str(user_id) for assignee in shown["task"]["assignees"])
+            assert tag_name in shown["task"]["tags"]
+            created_state = client.get_task(task_id)
+            created_due_date = task_due_date(created_state)
+            assert created_due_date.milliseconds is not None
+            assert (
+                datetime.fromtimestamp(created_due_date.milliseconds / 1_000, UTC)
+                .date()
+                .isoformat()
+                == "2029-12-31"
+            )
+            assert user_id in task_assignee_ids(created_state)
+            assert tag_name.casefold() in {tag.casefold() for tag in task_tag_names(created_state)}
 
             comment_text = f"Disposable clickup-cli comment {run_id}"
             added_comment = _invoke(
@@ -90,6 +114,15 @@ def test_live_sandbox_cli_lifecycle() -> None:
                 comment["id"] == added_comment["comment"]["id"] and comment["text"] == comment_text
                 for comment in comments["comments"]
             )
+            shown_comment = _invoke(
+                runner,
+                base_url,
+                "task",
+                "comment",
+                "show",
+                f"https://app.clickup.com/t/{task_id}?comment={added_comment['comment']['id']}",
+            )
+            assert shown_comment["comment"] == added_comment["comment"]
 
             date_only = parse_due_date("2030-01-02")
             date_result = _invoke(

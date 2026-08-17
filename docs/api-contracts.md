@@ -40,13 +40,14 @@ Requests with a JSON body also carry `Content-Type: application/json`.
 | Discover valid statuses | `GET /api/v2/list/{list_id}`, no body |
 | Set status | `PUT /api/v2/task/{task_id}` with only `{"status":"<canonical label>"}` |
 | List comments | `GET /api/v2/task/{task_id}/comment`, no body |
+| Page comments | `GET /api/v2/task/{task_id}/comment?start=<date>&start_id=<id>`, no body |
 | Add comment | `POST /api/v2/task/{task_id}/comment` with exactly `{"comment_text":"<text>","notify_all":false}` |
 | Set date-only due date | `PUT /api/v2/task/{task_id}` with exactly `{"due_date":<UTC-midnight-ms>,"due_date_time":false}` |
 | Set timed due date | `PUT /api/v2/task/{task_id}` with exactly `{"due_date":<instant-ms>,"due_date_time":true}` |
 | Clear due date | `PUT /api/v2/task/{task_id}` with exactly `{"due_date":null}` |
 | Assign user | `PUT /api/v2/task/{task_id}` with exactly `{"assignees":{"add":[<user-id>],"rem":[]}}` |
 | Unassign user | `PUT /api/v2/task/{task_id}` with exactly `{"assignees":{"add":[],"rem":[<user-id>]}}` |
-| Create task | `POST /api/v2/list/{list_id}/task` with `name` plus only explicitly supplied supported fields |
+| Create task | `POST /api/v2/list/{list_id}/task` with `name` plus only explicitly supplied description, status, assignee, due-date, due-date-time, and tag fields |
 | Delete task | `DELETE /api/v2/task/{task_id}`, no body |
 
 `task set-status` and `task complete` deliberately add orchestration around the raw Update Task
@@ -61,6 +62,17 @@ read-back. ClickUp can canonicalize a date-only millisecond value for an account
 same calendar date, so date-only verification compares the UTC date and reports the observed
 `due_date_ms`. If the API exposes `due_date_time`, its value is also verified. Assignment read-back
 requires the target numeric user ID to be present or absent as requested.
+
+Comment lookup has no single-comment endpoint in API v2. `task comment show` therefore extracts a
+comment ID from the supplied ClickUp deep link or accepts it separately, reads the newest comment
+page, and advances with the last comment's documented `start` and `start_id` cursor until it finds
+the ID or reaches an empty page. Repeated cursors and excessive pagination fail closed.
+
+Task creation accepts the same validated date-only or timezone-aware due-date model as the update
+command and repeatable, normalized tag names. The initial POST includes all requested fields so the
+operation does not require follow-up mutation calls. A separate `GET /task/{task_id}` then verifies
+the returned ID, destination List, name, description, status, requested assignees, requested tags,
+and due date before success is reported.
 
 ## Live probe
 

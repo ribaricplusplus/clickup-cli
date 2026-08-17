@@ -18,14 +18,24 @@ runner = CliRunner()
 
 
 def task_payload(
-    status: str = "Open", *, status_type: str = "open", task_id: str = TASK_ID
+    status: str = "Open",
+    *,
+    status_type: str = "open",
+    task_id: str = TASK_ID,
+    name: str = "Synthetic task",
+    description: str = "Synthetic task description",
+    assignee_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     return {
-        "description": "Synthetic task description",
+        "assignees": [{"id": user_id} for user_id in (assignee_ids or [])],
+        "description": description,
+        "due_date": None,
+        "due_date_time": None,
         "id": task_id,
         "list": {"id": LIST_ID},
-        "name": "Synthetic task",
+        "name": name,
         "status": {"status": status, "type": status_type},
+        "tags": [],
         "url": f"https://app.clickup.com/t/{task_id}",
     }
 
@@ -113,12 +123,18 @@ def test_show_accepts_workspace_url_and_normalizes_json(mock_api: MockClickUpAPI
         "ok": True,
         "result": {
             "task": {
+                "assignees": [],
                 "description": "Synthetic task description",
+                "due_date": None,
+                "due_date_ms": None,
+                "due_date_time": None,
                 "id": TASK_ID,
                 "list_id": LIST_ID,
+                "list_name": None,
                 "name": "Synthetic task",
                 "status": "Open",
                 "status_type": "open",
+                "tags": [],
                 "url": f"https://app.clickup.com/t/{TASK_ID}",
             }
         },
@@ -250,7 +266,13 @@ def test_create_minimal_exact_body(mock_api: MockClickUpAPI) -> None:
         f"/api/v2/list/{LIST_ID}/task",
         headers=WRITE_HEADERS,
         json_body={"name": "Minimal task"},
-        response_json=task_payload(task_id="created_1"),
+        response_json={"id": "created_1"},
+    )
+    mock_api.expect(
+        "GET",
+        "/api/v2/task/created_1",
+        headers=READ_HEADERS,
+        response_json=task_payload(task_id="created_1", name="Minimal task", description=""),
     )
 
     result = invoke(mock_api, ["task", "create", "Minimal task", "--list-id", LIST_ID])
@@ -270,7 +292,18 @@ def test_create_populated_exact_body(mock_api: MockClickUpAPI) -> None:
             "name": "Populated task",
             "status": "Open",
         },
-        response_json=task_payload(task_id="created_2"),
+        response_json={"id": "created_2"},
+    )
+    mock_api.expect(
+        "GET",
+        "/api/v2/task/created_2",
+        headers=READ_HEADERS,
+        response_json=task_payload(
+            task_id="created_2",
+            name="Populated task",
+            description="Details",
+            assignee_ids=[12, 34],
+        ),
     )
 
     result = invoke(

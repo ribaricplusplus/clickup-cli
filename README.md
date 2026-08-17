@@ -78,6 +78,8 @@ clickup task show '<task-id-or-url>'
 clickup task status '<task-id-or-url>'
 clickup task set-status '<task-id-or-url>' 'In Progress'
 clickup task complete '<task-id-or-url>'
+clickup task comment show '<clickup-comment-url>'
+clickup task comment show '<task-id-or-url>' '<comment-id>'
 clickup task comment list '<task-id-or-url>'
 clickup task comment add '<task-id-or-url>' 'A concise update'
 clickup task due-date set '<task-id-or-url>' 2030-01-02
@@ -88,6 +90,8 @@ clickup task unassign '<task-id-or-url>' 101
 clickup task create 'Investigate failure' --list-id '<list-id>'
 clickup task create 'Fix failure' --list-id '<list-id>' --description 'Reproduce first' \
   --status 'Open' --assignee 101 --assignee 202
+clickup task create 'Check linked comment' --list-id '<list-id>' --due-date 2030-01-02 \
+  --assignee 101 --tag focus --description 'https://app.clickup.com/t/abc?comment=123'
 clickup task delete '<task-id-or-url>' --yes
 ```
 
@@ -98,17 +102,26 @@ https://app.clickup.com/t/<task-id>
 https://app.clickup.com/t/<workspace-id>/<task-id>
 ```
 
+`task comment show` also accepts a full task URL containing one `comment=<comment-id>` query value.
+When the ID is supplied separately, the command accepts the same task reference forms as every
+other task command. It follows ClickUp's comment cursor until it finds the requested ID or reaches
+the end of the task's comment history.
+
 Delete refuses to make an API request unless `--yes` is present.
 
-Date-only due dates use `YYYY-MM-DD` and send `due_date_time: false`. Timed due dates must
-include `Z` or an explicit UTC offset; the CLI converts them to milliseconds and sends
-`due_date_time: true`. ClickUp can canonicalize the stored millisecond value for a date-only
-due date. The CLI verifies the returned UTC calendar date, reports ClickUp's read-back value as
-`due_date_ms`, and verifies timed values exactly.
+Date-only due dates use `YYYY-MM-DD` and send `due_date_time: false`. Timed due dates must include
+`Z` or an explicit UTC offset; the CLI converts them to milliseconds and sends
+`due_date_time: true`. The same syntax works for `task due-date set` and `task create --due-date`.
+ClickUp can canonicalize the stored millisecond value for a date-only due date. The CLI verifies
+the returned UTC calendar date, reports ClickUp's read-back value as `due_date_ms`, and verifies
+timed values exactly. When a task read omits `due_date_time`, rich show output keeps that field `null`
+and renders `due_date` as the exact UTC instant rather than guessing date-only semantics.
 
 Comment creation always sends `notify_all: false`; ClickUp's ordinary notification rules still
 apply. Assignee commands accept ClickUp numeric user IDs and avoid a write when the requested
-membership is already present.
+membership is already present. `task create --tag` is repeatable; empty names are rejected and
+case-insensitive duplicates are sent only once. Tag names must already be available to the task's
+Workspace.
 
 ## Deterministic status behavior
 
@@ -145,7 +158,9 @@ failures use exit code 2. With `--json`, both use this machine-readable form:
 ```
 
 Task results use the stable fields `id`, `name`, `description`, `status`, `status_type`, `list_id`,
-and `url`. Missing API fields are represented as `null` instead of changing the schema.
+`list_name`, `due_date`, `due_date_ms`, `due_date_time`, `assignees`, `tags`, and `url`. Assignee
+entries contain stable `id`, `username`, and `email` fields. Missing scalar API fields are
+represented as `null` instead of changing the schema.
 
 ## API v2 and v3
 
@@ -161,6 +176,9 @@ version details into commands and domain logic.
 - Status writes are list-validated, minimal, idempotent, and verified by readback.
 - Comment creation is verified by comment ID and exact text.
 - Due-date and assignee writes read first, send only the requested field delta, and read back.
+- Task creation sends due dates and tags in the original POST, then separately reads the task and
+  verifies its ID, List, name, and every explicitly supplied supported field. If that readback fails,
+  the error includes the already-created task ID so the partial outcome is explicit.
 - Delete requires explicit confirmation and does no request otherwise.
 - HTTP timeouts are bounded. HTTP 429 honors both `Retry-After` and ClickUp's documented
   `X-RateLimit-Reset` timestamp with bounded delay and retry count.
@@ -189,16 +207,18 @@ uv build
 
 ### Opt-in live sandbox test
 
-The live test is skipped unless explicitly enabled. It requires a disposable sandbox List. It
-invokes every shipped operation through the CLI: identity, create, show, comment add/list,
-date-only and timed due-date set/clear, assign/unassign, status, set-status, semantic completion,
-and guarded deletion. API read-backs verify each mutation, the normal path requires post-delete
-HTTP `404`, and a `finally` block provides fallback cleanup.
+The live test is skipped unless explicitly enabled. It requires a disposable sandbox List and an
+existing Workspace tag that may be attached to its temporary task. It invokes every shipped
+operation through the CLI: identity, create with assignee/due-date/tag fields, rich show, comment
+add/list/show, date-only and timed due-date set/clear, assign/unassign, status, set-status, semantic
+completion, and guarded deletion. API read-backs verify each mutation, the normal path requires
+post-delete HTTP `404`, and a `finally` block provides fallback cleanup.
 
 ```console
 CLICKUP_LIVE_TEST=1 \
 CLICKUP_API_TOKEN='<personal-token>' \
 CLICKUP_TEST_LIST_ID='<sandbox-list-id>' \
+CLICKUP_TEST_TAG='<existing-workspace-tag>' \
 uv run pytest -m live tests/test_live.py
 ```
 

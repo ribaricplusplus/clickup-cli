@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from clickup_cli.errors import ReferenceError
 
@@ -46,6 +46,39 @@ def parse_task_ref(reference: str) -> str:
     if not _valid_id(task_id):
         raise ReferenceError("ClickUp task URL contains an invalid task ID")
     return task_id
+
+
+def parse_comment_ref(reference: str, comment_id: str | None = None) -> tuple[str, str]:
+    """Return task and comment IDs from an explicit pair or ClickUp comment deep link."""
+
+    task_id = parse_task_ref(reference)
+    parsed = urlsplit(reference.strip())
+    query_values = parse_qs(parsed.query, keep_blank_values=True).get("comment", [])
+    linked_comment_id: str | None = None
+    if query_values:
+        if len(query_values) != 1 or not _valid_id(query_values[0]):
+            raise ReferenceError("ClickUp comment URL must contain one valid comment query value")
+        linked_comment_id = query_values[0]
+
+    explicit_comment_id: str | None = None
+    if comment_id is not None:
+        explicit_comment_id = comment_id.strip()
+        if not _valid_id(explicit_comment_id):
+            raise ReferenceError(
+                "COMMENT_ID must contain only letters, numbers, underscores, or hyphens"
+            )
+
+    if (
+        linked_comment_id is not None
+        and explicit_comment_id is not None
+        and linked_comment_id != explicit_comment_id
+    ):
+        raise ReferenceError("COMMENT_ID conflicts with the ClickUp comment URL")
+
+    resolved_comment_id = explicit_comment_id or linked_comment_id
+    if resolved_comment_id is None:
+        raise ReferenceError("COMMENT_ID is required unless TASK_REF is a ClickUp comment URL")
+    return task_id, resolved_comment_id
 
 
 def validate_native_id(value: str, *, label: str) -> str:
