@@ -16,6 +16,13 @@ from typer.main import get_command
 from clickup_cli import __version__
 from clickup_cli.client import ClickUpClient
 from clickup_cli.config import DEFAULT_ENV_FILE, resolve_base_url, resolve_token
+from clickup_cli.discovery import (
+    DEFAULT_TASK_LIMIT,
+    MAX_TASK_RESULTS,
+    DiscoveryService,
+    EnsureResult,
+    TaskQuery,
+)
 from clickup_cli.domain import (
     AssignmentMutationResult,
     CommentMutationResult,
@@ -35,8 +42,14 @@ auth_app = typer.Typer(no_args_is_help=True, help="Authentication inspection.")
 task_app = typer.Typer(no_args_is_help=True, help="Read and mutate ClickUp tasks.")
 comment_app = typer.Typer(no_args_is_help=True, help="Show, list, and add task comments.")
 due_date_app = typer.Typer(no_args_is_help=True, help="Set and clear task due dates.")
+workspace_app = typer.Typer(no_args_is_help=True, help="Discover ClickUp Workspaces.")
+member_app = typer.Typer(no_args_is_help=True, help="Discover Workspace members.")
+list_app = typer.Typer(no_args_is_help=True, help="Inspect ClickUp Lists.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(task_app, name="task")
+app.add_typer(workspace_app, name="workspace")
+app.add_typer(member_app, name="member")
+app.add_typer(list_app, name="list")
 task_app.add_typer(comment_app, name="comment")
 task_app.add_typer(due_date_app, name="due-date")
 
@@ -241,6 +254,388 @@ def whoami(context: typer.Context) -> None:
         operation,
         json_result=lambda user: {"user": user},
         text_result=text,
+    )
+
+
+def _catalog_text(resources: list[JsonObject], *, empty: str) -> str:
+    if not resources:
+        return empty
+    return "\n".join(f"{item.get('id')} {item.get('name') or ''}".rstrip() for item in resources)
+
+
+@workspace_app.command("list")
+def list_workspaces(context: typer.Context) -> None:
+    """List authorized Workspaces without exposing embedded member data."""
+
+    state = _state(context)
+    _execute(
+        state,
+        lambda: _with_client(state, lambda client: DiscoveryService(client).list_workspaces()),
+        json_result=lambda workspaces: {"workspaces": cast(list[JsonValue], workspaces)},
+        text_result=lambda workspaces: _catalog_text(workspaces, empty="No workspaces"),
+    )
+
+
+def _tree_text(workspace: JsonObject) -> str:
+    lines = [f"{workspace.get('id')} {workspace.get('name') or ''}".rstrip()]
+    spaces = workspace.get("spaces")
+    if isinstance(spaces, list):
+        for space in spaces:
+            if not isinstance(space, dict):
+                continue
+            lines.append(f"  {space.get('id')} {space.get('name') or ''}".rstrip())
+            folders = space.get("folders")
+            if isinstance(folders, list):
+                for folder in folders:
+                    if not isinstance(folder, dict):
+                        continue
+                    lines.append(f"    {folder.get('id')} {folder.get('name') or ''}".rstrip())
+                    folder_lists = folder.get("lists")
+                    if isinstance(folder_lists, list):
+                        for item in folder_lists:
+                            if isinstance(item, dict):
+                                lines.append(
+                                    f"      {item.get('id')} {item.get('name') or ''}".rstrip()
+                                )
+            folderless_lists = space.get("lists")
+            if isinstance(folderless_lists, list):
+                for item in folderless_lists:
+                    if isinstance(item, dict):
+                        lines.append(f"    {item.get('id')} {item.get('name') or ''}".rstrip())
+    return "\n".join(lines)
+
+
+@workspace_app.command("tree")
+def workspace_tree(
+    context: typer.Context,
+    workspace_id: str = typer.Argument(..., metavar="WORKSPACE_ID"),
+    include_archived: bool = typer.Option(False, "--include-archived"),
+) -> None:
+    """Show a normalized Workspace, Space, Folder, and List tree."""
+
+    state = _state(context)
+    _execute(
+        state,
+        lambda: _with_client(
+            state,
+            lambda client: DiscoveryService(client).workspace_tree(
+                workspace_id, include_archived=include_archived
+            ),
+        ),
+        json_result=lambda workspace: {"workspace": workspace},
+        text_result=_tree_text,
+    )
+
+
+@member_app.command("list")
+def list_members(
+    context: typer.Context,
+    workspace_id: str = typer.Option(..., "--workspace-id", metavar="WORKSPACE_ID"),
+) -> None:
+    """List the minimal identities of members in one Workspace."""
+
+    state = _state(context)
+
+    def text(members: list[JsonObject]) -> str:
+        if not members:
+            return "No members"
+        return "\n".join(
+            (
+                f"{member.get('id')} {member.get('username') or ''}"
+                + (f" <{member['email']}>" if member.get("email") else "")
+            ).rstrip()
+            for member in members
+        )
+
+    _execute(
+        state,
+        lambda: _with_client(
+            state, lambda client: DiscoveryService(client).list_members(workspace_id)
+        ),
+        json_result=lambda members: {
+            "members": cast(list[JsonValue], members),
+            "workspace_id": workspace_id,
+        },
+        text_result=text,
+    )
+
+
+@list_app.command("show")
+def show_list(
+    context: typer.Context,
+    list_id: str = typer.Argument(..., metavar="LIST_ID"),
+) -> None:
+    """Show a List in a stable normalized shape."""
+
+    state = _state(context)
+
+    def text(item: JsonObject) -> str:
+        return "\n".join(
+            (
+                f"ID: {item.get('id') or ''}",
+                f"Name: {item.get('name') or ''}",
+                f"Space: {item.get('space_name') or item.get('space_id') or ''}",
+                f"Folder: {item.get('folder_name') or item.get('folder_id') or ''}",
+                f"Archived: {str(bool(item.get('archived'))).lower()}",
+            )
+        )
+
+    _execute(
+        state,
+        lambda: _with_client(state, lambda client: DiscoveryService(client).show_list(list_id)),
+        json_result=lambda item: {"list": item},
+        text_result=text,
+    )
+
+
+@list_app.command("statuses")
+def list_list_statuses(
+    context: typer.Context,
+    list_id: str = typer.Argument(..., metavar="LIST_ID"),
+) -> None:
+    """List normalized status labels and types for a List."""
+
+    state = _state(context)
+
+    def text(statuses: list[JsonObject]) -> str:
+        if not statuses:
+            return "No statuses"
+        return "\n".join(
+            f"{status.get('status')} ({status.get('type') or 'unknown'})" for status in statuses
+        )
+
+    _execute(
+        state,
+        lambda: _with_client(state, lambda client: DiscoveryService(client).list_statuses(list_id)),
+        json_result=lambda statuses: {
+            "list_id": list_id,
+            "statuses": cast(list[JsonValue], statuses),
+        },
+        text_result=text,
+    )
+
+
+def _task_query(
+    *,
+    workspace_id: str | None,
+    space_id: str | None,
+    folder_id: str | None,
+    list_id: str | None,
+    assignees: list[str] | None,
+    statuses: list[str] | None,
+    tags: list[str] | None,
+    exclude_tags: list[str] | None,
+    due: str | None,
+    include_closed: bool,
+    include_subtasks: bool,
+    include_archived: bool,
+    limit: int,
+    all_results: bool,
+) -> TaskQuery:
+    return TaskQuery.from_options(
+        workspace_id=workspace_id,
+        space_id=space_id,
+        folder_id=folder_id,
+        list_id=list_id,
+        assignees=assignees,
+        statuses=statuses,
+        tags=tags,
+        exclude_tags=exclude_tags,
+        due=due,
+        include_closed=include_closed,
+        include_subtasks=include_subtasks,
+        include_archived=include_archived,
+        limit=limit,
+        all_results=all_results,
+    )
+
+
+def _tasks_text(tasks: list[JsonObject]) -> str:
+    if not tasks:
+        return "No tasks"
+    return "\n".join(
+        f"{task.get('id')} [{task.get('status') or 'unknown'}] {task.get('name') or ''}".rstrip()
+        for task in tasks
+    )
+
+
+@task_app.command("list")
+def list_tasks(
+    context: typer.Context,
+    workspace_id: str | None = typer.Option(None, "--workspace-id", metavar="WORKSPACE_ID"),
+    space_id: str | None = typer.Option(None, "--space-id", metavar="SPACE_ID"),
+    folder_id: str | None = typer.Option(None, "--folder-id", metavar="FOLDER_ID"),
+    list_id: str | None = typer.Option(None, "--list-id", metavar="LIST_ID"),
+    assignees: list[str] | None = typer.Option(None, "--assignee", metavar="me|USER_ID"),
+    statuses: list[str] | None = typer.Option(None, "--status", metavar="STATUS"),
+    tags: list[str] | None = typer.Option(None, "--tag", metavar="TAG"),
+    exclude_tags: list[str] | None = typer.Option(None, "--exclude-tag", metavar="TAG"),
+    due: str | None = typer.Option(None, "--due", metavar="DUE_FILTER"),
+    include_closed: bool = typer.Option(False, "--include-closed"),
+    include_subtasks: bool = typer.Option(False, "--include-subtasks"),
+    include_archived: bool = typer.Option(False, "--include-archived"),
+    limit: int = typer.Option(
+        DEFAULT_TASK_LIMIT,
+        "--limit",
+        min=1,
+        max=MAX_TASK_RESULTS,
+        metavar="N",
+    ),
+    all_results: bool = typer.Option(
+        False, "--all", help="Return all results within safety limits."
+    ),
+) -> None:
+    """List tasks from exactly one scope with consistent local filtering."""
+
+    state = _state(context)
+
+    def operation() -> list[JsonObject]:
+        query = _task_query(
+            workspace_id=workspace_id,
+            space_id=space_id,
+            folder_id=folder_id,
+            list_id=list_id,
+            assignees=assignees,
+            statuses=statuses,
+            tags=tags,
+            exclude_tags=exclude_tags,
+            due=due,
+            include_closed=include_closed,
+            include_subtasks=include_subtasks,
+            include_archived=include_archived,
+            limit=limit,
+            all_results=all_results,
+        )
+        return _with_client(state, lambda client: DiscoveryService(client).list_tasks(query))
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda tasks: {"tasks": cast(list[JsonValue], tasks)},
+        text_result=_tasks_text,
+    )
+
+
+@task_app.command("search")
+def search_tasks(
+    context: typer.Context,
+    query_text: str = typer.Argument(..., metavar="QUERY"),
+    workspace_id: str | None = typer.Option(None, "--workspace-id", metavar="WORKSPACE_ID"),
+    space_id: str | None = typer.Option(None, "--space-id", metavar="SPACE_ID"),
+    folder_id: str | None = typer.Option(None, "--folder-id", metavar="FOLDER_ID"),
+    list_id: str | None = typer.Option(None, "--list-id", metavar="LIST_ID"),
+    assignees: list[str] | None = typer.Option(None, "--assignee", metavar="me|USER_ID"),
+    statuses: list[str] | None = typer.Option(None, "--status", metavar="STATUS"),
+    tags: list[str] | None = typer.Option(None, "--tag", metavar="TAG"),
+    exclude_tags: list[str] | None = typer.Option(None, "--exclude-tag", metavar="TAG"),
+    due: str | None = typer.Option(None, "--due", metavar="DUE_FILTER"),
+    include_closed: bool = typer.Option(False, "--include-closed"),
+    include_subtasks: bool = typer.Option(False, "--include-subtasks"),
+    include_archived: bool = typer.Option(False, "--include-archived"),
+    limit: int = typer.Option(
+        DEFAULT_TASK_LIMIT,
+        "--limit",
+        min=1,
+        max=MAX_TASK_RESULTS,
+        metavar="N",
+    ),
+    all_results: bool = typer.Option(
+        False, "--all", help="Return all results within safety limits."
+    ),
+    exact_name: bool = typer.Option(False, "--exact-name"),
+    deep: bool = typer.Option(False, "--deep"),
+) -> None:
+    """Search task names and descriptions case-insensitively."""
+
+    state = _state(context)
+
+    def operation() -> list[JsonObject]:
+        task_query = _task_query(
+            workspace_id=workspace_id,
+            space_id=space_id,
+            folder_id=folder_id,
+            list_id=list_id,
+            assignees=assignees,
+            statuses=statuses,
+            tags=tags,
+            exclude_tags=exclude_tags,
+            due=due,
+            include_closed=include_closed,
+            include_subtasks=include_subtasks,
+            include_archived=include_archived,
+            limit=limit,
+            all_results=all_results,
+        )
+        return _with_client(
+            state,
+            lambda client: DiscoveryService(client).search_tasks(
+                task_query,
+                query_text,
+                exact_name=exact_name,
+                deep=deep,
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda tasks: {
+            "query": query_text,
+            "tasks": cast(list[JsonValue], tasks),
+        },
+        text_result=_tasks_text,
+    )
+
+
+def _ensure_json(result: EnsureResult) -> JsonObject:
+    return {"created": result.created, "task": result.task}
+
+
+@task_app.command("ensure")
+def ensure_task(
+    context: typer.Context,
+    name: str = typer.Argument(..., metavar="NAME"),
+    list_id: str = typer.Option(..., "--list-id", metavar="LIST_ID"),
+    description: str | None = typer.Option(None, "--description"),
+    status: str | None = typer.Option(None, "--status"),
+    assignees: list[int] | None = typer.Option(None, "--assignee", metavar="USER_ID"),
+    due_at: str | None = typer.Option(
+        None,
+        "--due-date",
+        metavar="DUE_AT",
+        help="YYYY-MM-DD or timezone-aware ISO 8601 timestamp.",
+    ),
+    tags: list[str] | None = typer.Option(None, "--tag", metavar="TAG"),
+) -> None:
+    """Return one exact-name List task or create it through verified creation."""
+
+    state = _state(context)
+
+    def operation() -> EnsureResult:
+        native_list_id = validate_native_id(list_id, label="LIST_ID")
+        requested_due_date = parse_due_date(due_at) if due_at is not None else None
+        return _with_client(
+            state,
+            lambda client: DiscoveryService(client).ensure_task(
+                name,
+                native_list_id,
+                description=description,
+                status=status,
+                assignees=assignees,
+                due_date=requested_due_date,
+                tags=tags,
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=_ensure_json,
+        text_result=lambda result: (
+            f"Created {result.task.get('id')}: {result.task.get('name')}"
+            if result.created
+            else f"Found {result.task.get('id')}: {result.task.get('name')} (no change)"
+        ),
     )
 
 
