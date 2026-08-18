@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import email.utils
+import stat
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
-from urllib.parse import urlencode
+from pathlib import Path
+from typing import Any, BinaryIO
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -87,20 +89,30 @@ class ClickUpClient:
         path: str,
         *,
         json_body: JsonObject | None = None,
+        files: dict[str, tuple[str, BinaryIO, str]] | None = None,
+        json_content_type: bool = False,
     ) -> httpx.Response:
-        headers = {"Content-Type": "application/json"} if json_body is not None else None
-        for attempt in range(self._max_rate_limit_retries + 1):
+        if json_body is not None and files is not None:
+            raise InvalidOperationError("A request cannot contain JSON and multipart bodies")
+        headers = (
+            {"Content-Type": "application/json"}
+            if json_body is not None or json_content_type
+            else None
+        )
+        retry_count = self._max_rate_limit_retries if method in {"GET", "PUT", "DELETE"} else 0
+        for attempt in range(retry_count + 1):
             try:
                 response = self._http.request(
                     method,
                     self._url(path),
                     headers=headers,
                     json=json_body,
+                    files=files,
                 )
             except httpx.RequestError as exc:
                 safe_message = self._redact(str(exc))
                 raise TransportError(f"ClickUp request failed: {safe_message}") from exc
-            if response.status_code != 429 or attempt == self._max_rate_limit_retries:
+            if response.status_code != 429 or attempt == retry_count:
                 break
             delay = self._retry_delay(response)
             response.close()
@@ -159,6 +171,119 @@ class ClickUpClient:
         task_id = validate_native_id(task_id, label="TASK_ID")
         response = self._request("PUT", f"/task/{task_id}", json_body={"status": canonical_status})
         response.close()
+
+    def update_task(self, task_id: str, fields: JsonObject) -> None:
+        task_id = validate_native_id(task_id, label="TASK_ID")
+        if not fields:
+            raise InvalidOperationError("A task update must contain at least one field")
+        supported_fields = {
+            "archived",
+            "description",
+            "name",
+            "priority",
+            "start_date",
+            "start_date_time",
+        }
+        unsupported = sorted(set(fields) - supported_fields)
+        if unsupported:
+            raise InvalidOperationError("Unsupported task update fields: " + ", ".join(unsupported))
+        if "name" in fields and (
+            not isinstance(fields["name"], str) or not str(fields["name"]).strip()
+        ):
+            raise InvalidOperationError("Task name must be non-empty text")
+        if "description" in fields and not isinstance(fields["description"], str):
+            raise InvalidOperationError("Task description must be text")
+        if "priority" in fields:
+            priority = fields["priority"]
+            if priority is not None and (
+                isinstance(priority, bool)
+                or not isinstance(priority, int)
+                or priority not in range(1, 5)
+            ):
+                raise InvalidOperationError("Task priority must be 1, 2, 3, 4, or null")
+        if "start_date" in fields:
+            start_date = fields["start_date"]
+            if start_date is not None and (
+                isinstance(start_date, bool) or not isinstance(start_date, int) or start_date < 0
+            ):
+                raise InvalidOperationError(
+                    "Task start date must be non-negative milliseconds or null"
+                )
+        if "start_date_time" in fields:
+            if not isinstance(fields["start_date_time"], bool):
+                raise InvalidOperationError("start_date_time must be boolean")
+            if "start_date" not in fields or fields["start_date"] is None:
+                raise InvalidOperationError(
+                    "start_date_time requires a non-null start_date in the same update"
+                )
+        if "archived" in fields and not isinstance(fields["archived"], bool):
+            raise InvalidOperationError("Task archived state must be boolean")
+        response = self._request("PUT", f"/task/{task_id}", json_body=fields)
+        response.close()
+
+    def update_task_tag(self, task_id: str, tag_name: str, *, add: bool) -> None:
+        task_id = validate_native_id(task_id, label="TASK_ID")
+        if (
+            not isinstance(tag_name, str)
+            or not tag_name.strip()
+            or any(character in tag_name for character in ("\0", "\r", "\n"))
+        ):
+            raise InvalidOperationError("Tag name cannot be empty")
+        encoded_tag = "%2E" * len(tag_name) if tag_name in {".", ".."} else quote(tag_name, safe="")
+        method = "POST" if add else "DELETE"
+        response = self._request(
+            method,
+            f"/task/{task_id}/tag/{encoded_tag}",
+            json_content_type=True,
+        )
+        response.close()
+
+    def upload_task_attachment(
+        self,
+        task_id: str,
+        path: Path,
+        *,
+        upload_name: str,
+    ) -> JsonObject:
+        task_id = validate_native_id(task_id, label="TASK_ID")
+        if (
+            not upload_name
+            or not upload_name.strip()
+            or upload_name in {".", ".."}
+            or any(character in upload_name for character in ("/", "\\", "\0", "\r", "\n"))
+        ):
+            raise InvalidOperationError("Attachment name must be a plain file name")
+        try:
+            metadata = path.stat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise InvalidOperationError(f"Attachment path is not a regular file: {path}")
+            with path.open("rb") as handle:
+                return self._object_response_with_files(
+                    "POST",
+                    f"/task/{task_id}/attachment",
+                    files={"attachment": (upload_name, handle, "application/octet-stream")},
+                )
+        except OSError as exc:
+            raise InvalidOperationError(f"Could not read attachment file: {path}") from exc
+
+    def _object_response_with_files(
+        self,
+        method: str,
+        path: str,
+        *,
+        files: dict[str, tuple[str, BinaryIO, str]],
+    ) -> JsonObject:
+        response = self._request(method, path, files=files)
+        status_code = response.status_code
+        try:
+            payload: Any = response.json()
+        except ValueError as exc:
+            raise APIError("ClickUp API returned invalid JSON", status_code=status_code) from exc
+        finally:
+            response.close()
+        if not isinstance(payload, dict):
+            raise APIError("ClickUp API returned an unexpected JSON shape", status_code=status_code)
+        return payload
 
     def get_task_comments(
         self,

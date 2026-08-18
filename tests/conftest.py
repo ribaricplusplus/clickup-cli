@@ -6,10 +6,21 @@ import socket
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from email import policy
+from email.message import EmailMessage
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 
 import pytest
+
+
+@dataclass(frozen=True)
+class MultipartPart:
+    name: str
+    filename: str | None
+    content_type: str
+    body: bytes
 
 
 @dataclass(frozen=True)
@@ -18,8 +29,11 @@ class ExpectedRequest:
     path: str
     headers: dict[str, str]
     json_body: object
+    multipart_body: tuple[MultipartPart, ...] | None
+    raw_body: bytes | None
     response_status: int
     response_json: object
+    response_body: bytes | None
     response_headers: dict[str, str]
     disconnect: bool
 
@@ -30,6 +44,8 @@ class RecordedRequest:
     path: str
     headers: dict[str, str]
     json_body: object
+    multipart_body: tuple[MultipartPart, ...] | None
+    raw_body: bytes
 
 
 @dataclass
@@ -50,14 +66,43 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _handle(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(length) if length else b""
+        headers = {key.lower(): value for key, value in self.headers.items()}
+        content_type = headers.get("content-type", "")
+        multipart_body: tuple[MultipartPart, ...] | None = None
         decoded_body: object = None
-        if raw_body:
+        if raw_body and content_type.casefold().startswith("multipart/form-data"):
+            message = cast(
+                EmailMessage,
+                BytesParser(policy=policy.default).parsebytes(
+                    f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + raw_body
+                ),
+            )
+            parts: list[MultipartPart] = []
+            for part in message.iter_parts():
+                payload = part.get_payload(decode=True)
+                raw_name = part.get_param("name", header="content-disposition")
+                parts.append(
+                    MultipartPart(
+                        name=raw_name if isinstance(raw_name, str) else "",
+                        filename=part.get_filename(),
+                        content_type=part.get_content_type(),
+                        body=payload if isinstance(payload, bytes) else b"",
+                    )
+                )
+            multipart_body = tuple(parts)
+        elif raw_body:
             try:
                 decoded_body = json.loads(raw_body)
             except json.JSONDecodeError:
                 decoded_body = raw_body.decode("utf-8", errors="replace")
-        headers = {key.lower(): value for key, value in self.headers.items()}
-        actual = RecordedRequest(self.command, self.path, headers, decoded_body)
+        actual = RecordedRequest(
+            self.command,
+            self.path,
+            headers,
+            decoded_body,
+            multipart_body,
+            raw_body,
+        )
 
         with self.server.state.lock:
             self.server.state.requests.append(actual)
@@ -84,10 +129,24 @@ class _RequestHandler(BaseHTTPRequestHandler):
             actual_value = actual.headers.get(key.lower())
             if actual_value != value:
                 mismatches.append(f"header {key!r} expected {value!r}, received {actual_value!r}")
-        if actual.json_body != expected.json_body:
+        if expected.multipart_body is not None and actual.multipart_body != expected.multipart_body:
             mismatches.append(
-                f"JSON body expected {expected.json_body!r}, received {actual.json_body!r}"
+                "multipart body expected "
+                f"{expected.multipart_body!r}, received {actual.multipart_body!r}"
             )
+        elif expected.raw_body is not None and actual.raw_body != expected.raw_body:
+            mismatches.append(
+                f"raw body expected {expected.raw_body!r}, received {actual.raw_body!r}"
+            )
+        elif expected.multipart_body is None:
+            if actual.multipart_body is not None:
+                mismatches.append(
+                    f"JSON body expected {expected.json_body!r}, received multipart data"
+                )
+            elif actual.json_body != expected.json_body:
+                mismatches.append(
+                    f"JSON body expected {expected.json_body!r}, received {actual.json_body!r}"
+                )
         if mismatches:
             with self.server.state.lock:
                 self.server.state.violations.extend(mismatches)
@@ -96,17 +155,20 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
-        response_body = (
-            b""
-            if expected.response_json is None
-            else json.dumps(expected.response_json).encode("utf-8")
-        )
+        response_body = expected.response_body
+        if response_body is None:
+            response_body = (
+                b""
+                if expected.response_json is None
+                else json.dumps(expected.response_json).encode("utf-8")
+            )
         self.send_response(expected.response_status)
-        if response_body:
+        if expected.response_body is None and response_body:
             self.send_header("Content-Type", "application/json")
         for key, value in expected.response_headers.items():
             self.send_header(key, value)
-        self.send_header("Content-Length", str(len(response_body)))
+        if "content-length" not in {key.casefold() for key in expected.response_headers}:
+            self.send_header("Content-Length", str(len(response_body)))
         self.end_headers()
         if response_body:
             self.wfile.write(response_body)
@@ -137,8 +199,11 @@ class MockClickUpAPI:
         *,
         headers: dict[str, str] | None = None,
         json_body: object = None,
+        multipart_body: tuple[MultipartPart, ...] | None = None,
+        raw_body: bytes | None = None,
         response_status: int = 200,
         response_json: object = None,
+        response_body: bytes | None = None,
         response_headers: dict[str, str] | None = None,
         disconnect: bool = False,
     ) -> None:
@@ -148,8 +213,11 @@ class MockClickUpAPI:
                 path=path,
                 headers=headers or {},
                 json_body=json_body,
+                multipart_body=multipart_body,
+                raw_body=raw_body,
                 response_status=response_status,
                 response_json=response_json,
+                response_body=response_body,
                 response_headers=response_headers or {},
                 disconnect=disconnect,
             )

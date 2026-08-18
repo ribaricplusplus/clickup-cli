@@ -2,7 +2,9 @@
 
 from typing import TypeAlias
 
-ErrorDetail: TypeAlias = str | int | float | bool | None
+from clickup_cli.types import JsonValue
+
+ErrorDetail: TypeAlias = JsonValue
 
 
 class ClickUpCLIError(Exception):
@@ -61,6 +63,12 @@ class CreatedButUnverifiedError(ClickUpCLIError):
     error_type = "created_but_unverified"
 
 
+class CreatedButAttachmentFailedError(ClickUpCLIError):
+    """A task was created, but one of its requested attachments did not finish safely."""
+
+    error_type = "created_but_attachment_failed"
+
+
 class InvalidStatusError(ClickUpCLIError):
     """A requested status does not exist in the task's home list."""
 
@@ -71,6 +79,18 @@ class InvalidDueDateError(ClickUpCLIError):
     """A requested due date is not an accepted ISO date or timestamp."""
 
     error_type = "invalid_due_date"
+
+
+class InvalidStartDateError(ClickUpCLIError):
+    """A requested start date is not an accepted ISO date or timestamp."""
+
+    error_type = "invalid_start_date"
+
+
+class InvalidPriorityError(ClickUpCLIError):
+    """A requested priority is not supported."""
+
+    error_type = "invalid_priority"
 
 
 class InvalidOperationError(ClickUpCLIError):
@@ -101,3 +121,27 @@ class ConfirmationError(ClickUpCLIError):
     """A destructive operation was not explicitly confirmed."""
 
     error_type = "confirmation_required"
+
+
+class AttachmentNotFoundError(ClickUpCLIError):
+    """A requested attachment is not present on the fetched task."""
+
+    error_type = "attachment_not_found"
+
+
+class AttachmentOutcomeUnknownError(ClickUpCLIError):
+    """An attachment upload may have succeeded before its response was lost."""
+
+    error_type = "attachment_outcome_unknown"
+
+
+class AttachmentUploadedButUnverifiedError(ClickUpCLIError):
+    """An uploaded attachment ID is known, but task readback did not verify it."""
+
+    error_type = "attachment_uploaded_but_unverified"
+
+
+class AttachmentDownloadError(ClickUpCLIError):
+    """An attachment could not be downloaded safely."""
+
+    error_type = "attachment_download_failed"

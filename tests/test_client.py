@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -107,6 +108,11 @@ def test_client_rejects_unsafe_path_ids_before_network(mock_api: MockClickUpAPI)
             lambda: client.get_task("../user"),
             lambda: client.get_list("../task"),
             lambda: client.update_task_status("../user", "done"),
+            lambda: client.update_task("../user", {"archived": True}),
+            lambda: client.update_task_tag("../user", "focus", add=True),
+            lambda: client.upload_task_attachment(
+                "../user", Path("unused"), upload_name="unused.txt"
+            ),
             lambda: client.get_task_comments("../user"),
             lambda: client.create_task_comment("../user", "comment"),
             lambda: client.update_task_due_date("../user", 1, due_date_time=True),
@@ -131,6 +137,13 @@ def test_client_rejects_invalid_operation_values_before_network(
             lambda: client.update_task_due_date("task_123", 1, due_date_time=None),
             lambda: client.update_task_assignees("task_123", add=[cast(Any, "42")], remove=[]),
             lambda: client.update_task_assignees("task_123", add=[42], remove=[42]),
+            lambda: client.update_task("task_123", {}),
+            lambda: client.update_task("task_123", {"priority": 5}),
+            lambda: client.update_task("task_123", {"start_date_time": True}),
+            lambda: client.update_task_tag("task_123", "bad\ntag", add=True),
+            lambda: client.upload_task_attachment(
+                "task_123", Path("unused"), upload_name="../unsafe.txt"
+            ),
         )
         for operation in operations:
             with pytest.raises(InvalidOperationError):

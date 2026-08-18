@@ -14,6 +14,12 @@ from typer._click.exceptions import ClickException
 from typer.main import get_command
 
 from clickup_cli import __version__
+from clickup_cli.attachments import (
+    AttachmentDownloadResult,
+    AttachmentService,
+    AttachmentUploadResult,
+    validate_attachment_file,
+)
 from clickup_cli.client import ClickUpClient
 from clickup_cli.config import DEFAULT_ENV_FILE, resolve_base_url, resolve_token
 from clickup_cli.domain import (
@@ -26,8 +32,24 @@ from clickup_cli.domain import (
     summarize_task,
     task_status,
 )
-from clickup_cli.errors import APIError, ClickUpCLIError, ConfirmationError
+from clickup_cli.errors import (
+    APIError,
+    ClickUpCLIError,
+    ConfirmationError,
+    CreatedButAttachmentFailedError,
+    CreatedButUnverifiedError,
+    InvalidOperationError,
+)
 from clickup_cli.refs import parse_comment_ref, parse_task_ref, validate_native_id
+from clickup_cli.task_mutations import (
+    TagMutationResult,
+    TaskMutationService,
+    TaskUpdateRequest,
+    TaskUpdateResult,
+    parse_priority,
+    parse_start_date,
+    read_description_file,
+)
 from clickup_cli.types import JsonObject, JsonValue
 
 app = typer.Typer(no_args_is_help=True, help="Deterministic ClickUp operations.")
@@ -35,10 +57,18 @@ auth_app = typer.Typer(no_args_is_help=True, help="Authentication inspection.")
 task_app = typer.Typer(no_args_is_help=True, help="Read and mutate ClickUp tasks.")
 comment_app = typer.Typer(no_args_is_help=True, help="Show, list, and add task comments.")
 due_date_app = typer.Typer(no_args_is_help=True, help="Set and clear task due dates.")
+attachment_app = typer.Typer(no_args_is_help=True, help="List, upload, and download attachments.")
+priority_app = typer.Typer(no_args_is_help=True, help="Manage task priority.")
+start_date_app = typer.Typer(no_args_is_help=True, help="Manage task start dates.")
+tag_app = typer.Typer(no_args_is_help=True, help="Add and remove task tags.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(task_app, name="task")
 task_app.add_typer(comment_app, name="comment")
 task_app.add_typer(due_date_app, name="due-date")
+task_app.add_typer(attachment_app, name="attachment")
+task_app.add_typer(priority_app, name="priority")
+task_app.add_typer(start_date_app, name="start-date")
+task_app.add_typer(tag_app, name="tag")
 
 T = TypeVar("T")
 
@@ -160,6 +190,44 @@ def _comment_json(result: CommentMutationResult) -> JsonObject:
     return {"comment": result.comment, "task_id": result.task_id}
 
 
+def _task_update_json(result: TaskUpdateResult) -> JsonObject:
+    return {
+        "changed": result.changed,
+        "fields": cast(list[JsonValue], result.fields),
+        "task": summarize_task(result.task),
+        "task_id": result.task_id,
+    }
+
+
+def _task_update_text(result: TaskUpdateResult) -> str:
+    if result.changed:
+        return f"{result.task_id}: updated {', '.join(result.fields)}"
+    return f"{result.task_id}: requested state already present (no change)"
+
+
+def _tag_json(result: TagMutationResult) -> JsonObject:
+    return {
+        "added": result.added,
+        "changed": result.changed,
+        "tag": result.tag,
+        "tags": cast(list[JsonValue], result.tags),
+        "task_id": result.task_id,
+    }
+
+
+def _attachment_upload_json(result: AttachmentUploadResult) -> JsonObject:
+    return {"attachment": result.attachment, "task_id": result.task_id}
+
+
+def _attachment_download_json(result: AttachmentDownloadResult) -> JsonObject:
+    return {
+        "attachment_id": result.attachment_id,
+        "output": result.output,
+        "size": result.size,
+        "task_id": result.task_id,
+    }
+
+
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"clickup {__version__}")
@@ -273,10 +341,14 @@ def show_task(
                 f"ID: {task.get('id') or ''}",
                 f"Name: {task.get('name') or ''}",
                 f"Status: {task.get('status') or ''}",
+                f"Archived: {task.get('archived') if task.get('archived') is not None else ''}",
+                f"Priority: {task.get('priority') or ''}",
                 f"List: {task.get('list_name') or task.get('list_id') or ''}",
                 f"Due: {task.get('due_date') or ''}",
+                f"Start: {task.get('start_date') or ''}",
                 f"Assignees: {', '.join(assignee_labels)}",
                 f"Tags: {', '.join(tag_labels)}",
+                f"Attachments: {len(cast(list[JsonValue], task.get('attachments') or []))}",
                 f"URL: {task.get('url') or ''}",
             )
         )
@@ -491,6 +563,261 @@ def unassign_task(
     _execute(state, operation, json_result=_assignment_json, text_result=_assignment_text)
 
 
+@task_app.command("update")
+def update_task(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    name: str | None = typer.Option(None, "--name", metavar="TEXT"),
+    description: str | None = typer.Option(None, "--description", metavar="TEXT"),
+    description_file: Path | None = typer.Option(None, "--description-file", metavar="PATH"),
+    priority: str | None = typer.Option(None, "--priority", metavar="PRIORITY"),
+    start_date: str | None = typer.Option(None, "--start-date", metavar="START_AT"),
+    clear_start_date: bool = typer.Option(False, "--clear-start-date"),
+) -> None:
+    """Update explicitly supplied fields with one minimal write and one readback."""
+
+    state = _state(context)
+
+    def operation() -> TaskUpdateResult:
+        if description is not None and description_file is not None:
+            raise InvalidOperationError("Use exactly one of --description and --description-file")
+        if start_date is not None and clear_start_date:
+            raise InvalidOperationError("Cannot use --start-date and --clear-start-date together")
+        resolved_description = (
+            read_description_file(description_file) if description_file is not None else description
+        )
+        resolved_priority = parse_priority(priority) if priority is not None else None
+        resolved_start_date = parse_start_date(start_date) if start_date is not None else None
+        request = TaskUpdateRequest(
+            name=name,
+            description=resolved_description,
+            description_supplied=description is not None or description_file is not None,
+            priority=resolved_priority,
+            priority_supplied=priority is not None,
+            start_date=resolved_start_date,
+            clear_start_date=clear_start_date,
+        )
+        task_id = parse_task_ref(task_ref)
+        return _with_client(
+            state,
+            lambda client: TaskMutationService(client).update(task_id, request),
+        )
+
+    _execute(state, operation, json_result=_task_update_json, text_result=_task_update_text)
+
+
+@priority_app.command("clear")
+def clear_priority(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+) -> None:
+    """Clear task priority idempotently and verify the readback."""
+
+    state = _state(context)
+
+    def operation() -> TaskUpdateResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(
+            state,
+            lambda client: TaskMutationService(client).clear_priority(task_id),
+        )
+
+    _execute(state, operation, json_result=_task_update_json, text_result=_task_update_text)
+
+
+@start_date_app.command("clear")
+def clear_start_date(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+) -> None:
+    """Clear a task start date idempotently and verify the readback."""
+
+    state = _state(context)
+
+    def operation() -> TaskUpdateResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(
+            state,
+            lambda client: TaskMutationService(client).clear_start_date(task_id),
+        )
+
+    _execute(state, operation, json_result=_task_update_json, text_result=_task_update_text)
+
+
+def _set_archived(context: typer.Context, task_ref: str, *, archived: bool) -> None:
+    state = _state(context)
+
+    def operation() -> TaskUpdateResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(
+            state,
+            lambda client: TaskMutationService(client).set_archived(task_id, archived=archived),
+        )
+
+    _execute(state, operation, json_result=_task_update_json, text_result=_task_update_text)
+
+
+@task_app.command("archive")
+def archive_task(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+) -> None:
+    """Archive a task through a reversible verified lifecycle update."""
+
+    _set_archived(context, task_ref, archived=True)
+
+
+@task_app.command("unarchive")
+def unarchive_task(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+) -> None:
+    """Unarchive a task through a reversible verified lifecycle update."""
+
+    _set_archived(context, task_ref, archived=False)
+
+
+def _set_tag(context: typer.Context, task_ref: str, tag: str, *, add: bool) -> None:
+    state = _state(context)
+
+    def operation() -> TagMutationResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(
+            state,
+            lambda client: TaskMutationService(client).set_tag(task_id, tag, add=add),
+        )
+
+    action = "Added" if add else "Removed"
+    _execute(
+        state,
+        operation,
+        json_result=_tag_json,
+        text_result=lambda result: (
+            f"{action} tag {result.tag!r} on {result.task_id}"
+            if result.changed
+            else f"{result.task_id}: tag {result.tag!r} already in requested state (no change)"
+        ),
+    )
+
+
+@tag_app.command("add")
+def add_tag(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    tag: str = typer.Argument(..., metavar="TAG"),
+) -> None:
+    """Add a tag idempotently with safe path encoding and verified readback."""
+
+    _set_tag(context, task_ref, tag, add=True)
+
+
+@tag_app.command("remove")
+def remove_tag(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    tag: str = typer.Argument(..., metavar="TAG"),
+) -> None:
+    """Remove a tag idempotently with safe path encoding and verified readback."""
+
+    _set_tag(context, task_ref, tag, add=False)
+
+
+@attachment_app.command("list")
+def list_attachments(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+) -> None:
+    """List task attachments in a stable normalized shape."""
+
+    state = _state(context)
+
+    def operation() -> tuple[str, list[JsonObject]]:
+        task_id = parse_task_ref(task_ref)
+        attachments = _with_client(
+            state,
+            lambda client: AttachmentService(client).list(task_id),
+        )
+        return task_id, attachments
+
+    def text(result: tuple[str, list[JsonObject]]) -> str:
+        if not result[1]:
+            return "No attachments"
+        return "\n".join(
+            f"{attachment.get('id') or ''} {attachment.get('title') or ''}"
+            for attachment in result[1]
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: {
+            "attachments": cast(list[JsonValue], result[1]),
+            "task_id": result[0],
+        },
+        text_result=text,
+    )
+
+
+@attachment_app.command("upload")
+def upload_attachment(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    path: Path = typer.Argument(..., metavar="PATH"),
+    name: str | None = typer.Option(None, "--name", metavar="NAME"),
+) -> None:
+    """Upload one regular readable file and verify it on the task."""
+
+    state = _state(context)
+
+    def operation() -> AttachmentUploadResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(
+            state,
+            lambda client: AttachmentService(client).upload(task_id, path, name=name),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=_attachment_upload_json,
+        text_result=lambda result: f"Uploaded {result.attachment.get('id')} to {result.task_id}",
+    )
+
+
+@attachment_app.command("download")
+def download_attachment(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    attachment_id: str = typer.Argument(..., metavar="ATTACHMENT_ID"),
+    output: Path = typer.Option(..., "--output", metavar="PATH"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Download a fetched-task attachment atomically without forwarding authorization."""
+
+    state = _state(context)
+
+    def operation() -> AttachmentDownloadResult:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(
+            state,
+            lambda client: AttachmentService(client).download(
+                task_id,
+                attachment_id,
+                output,
+                force=force,
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=_attachment_download_json,
+        text_result=lambda result: (
+            f"Downloaded {result.attachment_id} to {result.output} ({result.size} bytes)"
+        ),
+    )
+
+
 @task_app.command("create")
 def create_task(
     context: typer.Context,
@@ -506,6 +833,7 @@ def create_task(
         help="YYYY-MM-DD or timezone-aware ISO 8601 timestamp.",
     ),
     tags: list[str] | None = typer.Option(None, "--tag", metavar="TAG"),
+    attachments: list[Path] | None = typer.Option(None, "--attach", metavar="PATH"),
 ) -> None:
     """Create and read back a task with only explicitly supplied supported fields."""
 
@@ -514,18 +842,61 @@ def create_task(
     def operation() -> JsonObject:
         native_list_id = validate_native_id(list_id, label="LIST_ID")
         requested_due_date = parse_due_date(due_at) if due_at is not None else None
-        task = _with_client(
-            state,
-            lambda client: TaskService(client).create_task(
-                native_list_id,
-                name,
-                description=description,
-                status=status,
-                assignees=assignees,
-                due_date=requested_due_date,
-                tags=tags,
-            ),
-        )
+        requested_attachments = list(attachments or [])
+        for path in requested_attachments:
+            validate_attachment_file(path)
+
+        def create_and_upload(client: ClickUpClient) -> JsonObject:
+            try:
+                task = TaskService(client).create_task(
+                    native_list_id,
+                    name,
+                    description=description,
+                    status=status,
+                    assignees=assignees,
+                    due_date=requested_due_date,
+                    tags=tags,
+                )
+            except CreatedButUnverifiedError as exc:
+                task_id = exc.details.get("task_id")
+                if requested_attachments and isinstance(task_id, str):
+                    raise CreatedButAttachmentFailedError(
+                        "Task was created, but attachment processing could not begin safely",
+                        details={
+                            "failed_path": str(requested_attachments[0]),
+                            "task_id": task_id,
+                            "uploaded_attachment_ids": [],
+                        },
+                    ) from exc
+                raise
+
+            task_id_value = task.get("id")
+            if not isinstance(task_id_value, (str, int)) or isinstance(task_id_value, bool):
+                raise APIError("Verified task is missing its ID")
+            task_id = str(task_id_value)
+            uploaded_ids: list[str] = []
+            attachment_service = AttachmentService(client)
+            for path in requested_attachments:
+                try:
+                    upload = attachment_service.upload(task_id, path)
+                except ClickUpCLIError as exc:
+                    raise CreatedButAttachmentFailedError(
+                        "Task was created, but a requested attachment failed; "
+                        "inspect the task before retrying the attachment",
+                        details={
+                            "failed_path": str(path),
+                            "task_id": task_id,
+                            "uploaded_attachment_ids": cast(list[JsonValue], uploaded_ids),
+                        },
+                    ) from exc
+                attachment_id = upload.attachment.get("id")
+                if not isinstance(attachment_id, str):
+                    raise RuntimeError("Verified attachment is missing its ID")
+                uploaded_ids.append(attachment_id)
+                task = upload.task
+            return task
+
+        task = _with_client(state, create_and_upload)
         return summarize_task(task)
 
     _execute(

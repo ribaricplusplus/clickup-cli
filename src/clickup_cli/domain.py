@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
 
+from clickup_cli.attachments import normalize_attachments
 from clickup_cli.client import ClickUpClient
 from clickup_cli.errors import (
     APIError,
@@ -22,6 +23,7 @@ from clickup_cli.errors import (
     VerificationError,
 )
 from clickup_cli.refs import validate_native_id
+from clickup_cli.task_mutations import priority_display, start_date_display, task_start_date
 from clickup_cli.types import JsonObject, JsonValue
 
 _COMPLETION_LABELS = ("completed", "complete", "done", "closed")
@@ -340,12 +342,20 @@ def summarize_task(task: JsonObject) -> JsonObject:
         else:
             due_date_display = _utc_datetime_from_ms(due_date.milliseconds)
 
+    raw_archived = task.get("archived")
+    if raw_archived is not None and not isinstance(raw_archived, bool):
+        raise APIError("ClickUp response contains an invalid archived state")
+    start_date = task_start_date(task)
+    attachments = normalize_attachments(task)
+
     raw_id = task.get("id")
     raw_name = task.get("name")
     raw_description = task.get("description")
     raw_url = task.get("url")
     return {
+        "archived": raw_archived if isinstance(raw_archived, bool) else None,
         "assignees": assignees,
+        "attachments": cast(list[JsonValue], attachments),
         "description": str(raw_description) if isinstance(raw_description, str) else None,
         "due_date": due_date_display,
         "due_date_ms": due_date.milliseconds,
@@ -354,6 +364,10 @@ def summarize_task(task: JsonObject) -> JsonObject:
         "list_id": list_id,
         "list_name": list_name,
         "name": str(raw_name) if isinstance(raw_name, str) else None,
+        "priority": priority_display(task),
+        "start_date": start_date_display(start_date),
+        "start_date_ms": start_date.milliseconds,
+        "start_date_time": start_date.has_time,
         "status": status_label,
         "status_type": status_type,
         "tags": tags,
