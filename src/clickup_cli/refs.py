@@ -87,3 +87,14 @@ def validate_native_id(value: str, *, label: str) -> str:
     if not _valid_id(value):
         raise ReferenceError(f"{label} must contain only letters, numbers, underscores, or hyphens")
     return value
+
+
+def validate_numeric_id(value: str, *, label: str) -> str:
+    """Validate a positive decimal ClickUp ID without alternate spellings."""
+
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+        raise ReferenceError(f"{label} must be a positive decimal integer")
+    parsed = int(value)
+    if parsed <= 0 or str(parsed) != value:
+        raise ReferenceError(f"{label} must be a positive decimal integer")
+    return value

@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 import httpx
 
 from clickup_cli.errors import APIError, InvalidOperationError, TransportError
-from clickup_cli.refs import validate_native_id
+from clickup_cli.refs import validate_native_id, validate_numeric_id
 from clickup_cli.types import JsonObject
 
 
@@ -87,8 +87,13 @@ class ClickUpClient:
         path: str,
         *,
         json_body: JsonObject | None = None,
+        json_content_type: bool = False,
     ) -> httpx.Response:
-        headers = {"Content-Type": "application/json"} if json_body is not None else None
+        headers = (
+            {"Content-Type": "application/json"}
+            if json_body is not None or json_content_type
+            else None
+        )
         for attempt in range(self._max_rate_limit_retries + 1):
             try:
                 response = self._http.request(
@@ -131,8 +136,14 @@ class ClickUpClient:
         path: str,
         *,
         json_body: JsonObject | None = None,
+        json_content_type: bool = False,
     ) -> JsonObject:
-        response = self._request(method, path, json_body=json_body)
+        response = self._request(
+            method,
+            path,
+            json_body=json_body,
+            json_content_type=json_content_type,
+        )
         status_code = response.status_code
         try:
             payload: Any = response.json()
@@ -276,4 +287,161 @@ class ClickUpClient:
     def delete_task(self, task_id: str) -> None:
         task_id = validate_native_id(task_id, label="TASK_ID")
         response = self._request("DELETE", f"/task/{task_id}")
+        response.close()
+
+    @staticmethod
+    def _positive_user_id(user_id: int, *, label: str = "ASSIGNEE") -> int:
+        if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+            raise InvalidOperationError(f"{label} must be a positive integer")
+        return user_id
+
+    def get_time_entries(
+        self,
+        workspace_id: str,
+        *,
+        start_ms: int,
+        end_ms: int,
+        assignee: int | None = None,
+        task_id: str | None = None,
+        space_id: str | None = None,
+        folder_id: str | None = None,
+        list_id: str | None = None,
+        billable: bool | None = None,
+    ) -> JsonObject:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        if (
+            isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or start_ms < 0
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or end_ms <= start_ms
+        ):
+            raise InvalidOperationError("Time range must use non-negative increasing milliseconds")
+        locations = [task_id, space_id, folder_id, list_id]
+        if sum(value is not None for value in locations) > 1:
+            raise InvalidOperationError("Only one time-entry location filter may be used")
+
+        query: dict[str, str | int] = {"start_date": start_ms, "end_date": end_ms}
+        if assignee is not None:
+            query["assignee"] = self._positive_user_id(assignee)
+        if task_id is not None:
+            query["task_id"] = validate_native_id(task_id, label="TASK_ID")
+        if space_id is not None:
+            query["space_id"] = validate_numeric_id(space_id, label="SPACE_ID")
+        if folder_id is not None:
+            query["folder_id"] = validate_numeric_id(folder_id, label="FOLDER_ID")
+        if list_id is not None:
+            query["list_id"] = validate_numeric_id(list_id, label="LIST_ID")
+        if billable is not None:
+            if not isinstance(billable, bool):
+                raise InvalidOperationError("Billable filter must be boolean")
+            query["is_billable"] = "true" if billable else "false"
+        return self._object_response(
+            "GET",
+            f"/team/{workspace_id}/time_entries?{urlencode(query)}",
+            json_content_type=True,
+        )
+
+    def get_current_time_entry(
+        self, workspace_id: str, *, assignee: int | None = None
+    ) -> JsonObject:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        path = f"/team/{workspace_id}/time_entries/current"
+        if assignee is not None:
+            path = f"{path}?{urlencode({'assignee': self._positive_user_id(assignee)})}"
+        return self._object_response("GET", path, json_content_type=True)
+
+    def start_time_entry(
+        self,
+        workspace_id: str,
+        *,
+        task_id: str | None = None,
+        description: str | None = None,
+        billable: bool | None = None,
+    ) -> JsonObject:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        body: JsonObject = {}
+        if task_id is not None:
+            body["tid"] = validate_native_id(task_id, label="TASK_ID")
+        if description is not None:
+            if not isinstance(description, str):
+                raise InvalidOperationError("Description must be a string")
+            body["description"] = description
+        if billable is not None:
+            if not isinstance(billable, bool):
+                raise InvalidOperationError("Billable state must be boolean")
+            body["billable"] = billable
+        return self._object_response(
+            "POST", f"/team/{workspace_id}/time_entries/start", json_body=body
+        )
+
+    def stop_time_entry(self, workspace_id: str) -> JsonObject:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        return self._object_response(
+            "POST",
+            f"/team/{workspace_id}/time_entries/stop",
+            json_content_type=True,
+        )
+
+    def create_time_entry(
+        self,
+        workspace_id: str,
+        *,
+        start_ms: int,
+        duration_ms: int,
+        task_id: str | None = None,
+        description: str | None = None,
+        billable: bool | None = None,
+    ) -> JsonObject:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        if isinstance(start_ms, bool) or not isinstance(start_ms, int) or start_ms < 0:
+            raise InvalidOperationError("Start must be non-negative integer milliseconds")
+        if isinstance(duration_ms, bool) or not isinstance(duration_ms, int) or duration_ms <= 0:
+            raise InvalidOperationError("Duration must be positive integer milliseconds")
+        body: JsonObject = {"start": start_ms, "duration": duration_ms}
+        if task_id is not None:
+            body["tid"] = validate_native_id(task_id, label="TASK_ID")
+        if description is not None:
+            if not isinstance(description, str):
+                raise InvalidOperationError("Description must be a string")
+            body["description"] = description
+        if billable is not None:
+            if not isinstance(billable, bool):
+                raise InvalidOperationError("Billable state must be boolean")
+            body["billable"] = billable
+        return self._object_response("POST", f"/team/{workspace_id}/time_entries", json_body=body)
+
+    def get_time_entry(self, workspace_id: str, entry_id: str) -> JsonObject:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        entry_id = validate_native_id(entry_id, label="ENTRY_ID")
+        return self._object_response(
+            "GET",
+            f"/team/{workspace_id}/time_entries/{entry_id}",
+            json_content_type=True,
+        )
+
+    def update_time_entry(self, workspace_id: str, entry_id: str, *, body: JsonObject) -> None:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        entry_id = validate_native_id(entry_id, label="ENTRY_ID")
+        allowed = {"description", "tags", "start", "end", "tid", "billable", "duration"}
+        if "tags" not in body or not isinstance(body["tags"], list):
+            raise InvalidOperationError("Time-entry updates require a tags array")
+        if not body.keys() <= allowed:
+            raise InvalidOperationError("Time-entry update contains unsupported fields")
+        if ("start" in body) != ("end" in body):
+            raise InvalidOperationError("Time-entry updates must provide start and end together")
+        response = self._request(
+            "PUT", f"/team/{workspace_id}/time_entries/{entry_id}", json_body=body
+        )
+        response.close()
+
+    def delete_time_entry(self, workspace_id: str, entry_id: str) -> None:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        entry_id = validate_native_id(entry_id, label="ENTRY_ID")
+        response = self._request(
+            "DELETE",
+            f"/team/{workspace_id}/time_entries/{entry_id}",
+            json_content_type=True,
+        )
         response.close()
