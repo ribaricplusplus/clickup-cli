@@ -2,7 +2,9 @@
 
 from typing import TypeAlias
 
-ErrorDetail: TypeAlias = str | int | float | bool | None
+from clickup_cli.types import JsonValue
+
+ErrorDetail: TypeAlias = JsonValue
 
 
 class ClickUpCLIError(Exception):
@@ -101,3 +103,15 @@ class ConfirmationError(ClickUpCLIError):
     """A destructive operation was not explicitly confirmed."""
 
     error_type = "confirmation_required"
+
+
+class ResourceNotFoundError(ClickUpCLIError):
+    """A requested catalog resource was not available to the authorized user."""
+
+    error_type = "resource_not_found"
+
+
+class AmbiguousMatchError(ClickUpCLIError):
+    """An idempotent operation found more than one safe candidate."""
+
+    error_type = "ambiguous_match"

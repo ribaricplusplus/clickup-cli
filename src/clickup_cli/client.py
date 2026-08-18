@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import email.utils
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
@@ -55,6 +55,12 @@ class ClickUpClient:
 
     def _url(self, path: str) -> str:
         return f"{self._base_url}/v2{path}"
+
+    @staticmethod
+    def _query_path(path: str, parameters: Sequence[tuple[str, str | int]]) -> str:
+        if not parameters:
+            return path
+        return f"{path}?{urlencode(parameters)}"
 
     def _redact(self, message: str) -> str:
         return message.replace(self._token, "[REDACTED]") if self._token else message
@@ -147,6 +153,41 @@ class ClickUpClient:
     def get_user(self) -> JsonObject:
         return self._object_response("GET", "/user")
 
+    def get_workspaces(self) -> JsonObject:
+        return self._object_response("GET", "/team")
+
+    def get_spaces(self, workspace_id: str, *, archived: bool) -> JsonObject:
+        workspace_id = validate_native_id(workspace_id, label="WORKSPACE_ID")
+        path = self._query_path(
+            f"/team/{workspace_id}/space",
+            [("archived", str(archived).lower())],
+        )
+        return self._object_response("GET", path)
+
+    def get_folders(self, space_id: str, *, archived: bool) -> JsonObject:
+        space_id = validate_native_id(space_id, label="SPACE_ID")
+        path = self._query_path(
+            f"/space/{space_id}/folder",
+            [("archived", str(archived).lower())],
+        )
+        return self._object_response("GET", path)
+
+    def get_space_lists(self, space_id: str, *, archived: bool) -> JsonObject:
+        space_id = validate_native_id(space_id, label="SPACE_ID")
+        path = self._query_path(
+            f"/space/{space_id}/list",
+            [("archived", str(archived).lower())],
+        )
+        return self._object_response("GET", path)
+
+    def get_folder_lists(self, folder_id: str, *, archived: bool) -> JsonObject:
+        folder_id = validate_native_id(folder_id, label="FOLDER_ID")
+        path = self._query_path(
+            f"/folder/{folder_id}/list",
+            [("archived", str(archived).lower())],
+        )
+        return self._object_response("GET", path)
+
     def get_task(self, task_id: str) -> JsonObject:
         task_id = validate_native_id(task_id, label="TASK_ID")
         return self._object_response("GET", f"/task/{task_id}")
@@ -154,6 +195,32 @@ class ClickUpClient:
     def get_list(self, list_id: str) -> JsonObject:
         list_id = validate_native_id(list_id, label="LIST_ID")
         return self._object_response("GET", f"/list/{list_id}")
+
+    def get_list_tasks(
+        self,
+        list_id: str,
+        *,
+        page: int,
+        parameters: Sequence[tuple[str, str | int]] = (),
+    ) -> JsonObject:
+        list_id = validate_native_id(list_id, label="LIST_ID")
+        if isinstance(page, bool) or not isinstance(page, int) or page < 0:
+            raise InvalidOperationError("Task page must be a non-negative integer")
+        path = self._query_path(f"/list/{list_id}/task", [("page", page), *parameters])
+        return self._object_response("GET", path)
+
+    def get_workspace_tasks(
+        self,
+        workspace_id: str,
+        *,
+        page: int,
+        parameters: Sequence[tuple[str, str | int]] = (),
+    ) -> JsonObject:
+        workspace_id = validate_native_id(workspace_id, label="WORKSPACE_ID")
+        if isinstance(page, bool) or not isinstance(page, int) or page < 0:
+            raise InvalidOperationError("Task page must be a non-negative integer")
+        path = self._query_path(f"/team/{workspace_id}/task", [("page", page), *parameters])
+        return self._object_response("GET", path)
 
     def update_task_status(self, task_id: str, canonical_status: str) -> None:
         task_id = validate_native_id(task_id, label="TASK_ID")
