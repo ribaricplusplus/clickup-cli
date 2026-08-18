@@ -119,6 +119,14 @@ def test_client_rejects_unsafe_path_ids_before_network(mock_api: MockClickUpAPI)
             lambda: client.update_task_assignees("../user", add=[42], remove=[]),
             lambda: client.create_task("../task", "Synthetic task"),
             lambda: client.delete_task("../user"),
+            lambda: client.get_time_entries("../team", start_ms=0, end_ms=1),
+            lambda: client.get_current_time_entry("../team"),
+            lambda: client.start_time_entry("42", task_id="../task"),
+            lambda: client.stop_time_entry("../team"),
+            lambda: client.create_time_entry("42", start_ms=0, duration_ms=1, task_id="../task"),
+            lambda: client.get_time_entry("42", "../entry"),
+            lambda: client.update_time_entry("42", "../entry", body={"tags": []}),
+            lambda: client.delete_time_entry("42", "../entry"),
         )
         for operation in operations:
             with pytest.raises(TaskReferenceError):
@@ -144,6 +152,14 @@ def test_client_rejects_invalid_operation_values_before_network(
             lambda: client.upload_task_attachment(
                 "task_123", Path("unused"), upload_name="../unsafe.txt"
             ),
+            lambda: client.get_time_entries("42", start_ms=1, end_ms=1),
+            lambda: client.get_time_entries(
+                "42", start_ms=0, end_ms=1, space_id="11", list_id="12"
+            ),
+            lambda: client.get_current_time_entry("42", assignee=cast(Any, True)),
+            lambda: client.create_time_entry("42", start_ms=0, duration_ms=0),
+            lambda: client.update_time_entry("42", "1001", body={}),
+            lambda: client.update_time_entry("42", "1001", body={"tags": [], "start": 0}),
         )
         for operation in operations:
             with pytest.raises(InvalidOperationError):

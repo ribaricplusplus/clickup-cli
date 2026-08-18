@@ -47,7 +47,12 @@ from clickup_cli.errors import (
     CreatedButUnverifiedError,
     InvalidOperationError,
 )
-from clickup_cli.refs import parse_comment_ref, parse_task_ref, validate_native_id
+from clickup_cli.refs import (
+    parse_comment_ref,
+    parse_task_ref,
+    validate_native_id,
+    validate_numeric_id,
+)
 from clickup_cli.task_mutations import (
     TagMutationResult,
     TaskMutationService,
@@ -56,6 +61,15 @@ from clickup_cli.task_mutations import (
     parse_priority,
     parse_start_date,
     read_description_file,
+)
+from clickup_cli.time_tracking import (
+    StopTimeResult,
+    TimeListResult,
+    TimeMutationResult,
+    TimeTrackingService,
+    parse_duration,
+    parse_time_boundary,
+    parse_time_range,
 )
 from clickup_cli.types import JsonObject, JsonValue
 
@@ -71,11 +85,13 @@ attachment_app = typer.Typer(no_args_is_help=True, help="List, upload, and downl
 priority_app = typer.Typer(no_args_is_help=True, help="Manage task priority.")
 start_date_app = typer.Typer(no_args_is_help=True, help="Manage task start dates.")
 tag_app = typer.Typer(no_args_is_help=True, help="Add and remove task tags.")
+time_app = typer.Typer(no_args_is_help=True, help="Read and safely mutate time entries.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(task_app, name="task")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(member_app, name="member")
 app.add_typer(list_app, name="list")
+app.add_typer(time_app, name="time")
 task_app.add_typer(comment_app, name="comment")
 task_app.add_typer(due_date_app, name="due-date")
 task_app.add_typer(attachment_app, name="attachment")
@@ -239,6 +255,40 @@ def _attachment_download_json(result: AttachmentDownloadResult) -> JsonObject:
         "size": result.size,
         "task_id": result.task_id,
     }
+
+
+def _time_mutation_json(result: TimeMutationResult) -> JsonObject:
+    return {"changed": result.changed, "entry": result.entry}
+
+
+def _time_entry_text(entry: JsonObject) -> str:
+    duration = entry.get("duration_ms")
+    state = (
+        "running"
+        if entry.get("running")
+        else f"{duration}ms"
+        if isinstance(duration, int) and not isinstance(duration, bool)
+        else "duration=unknown"
+    )
+    task = f" task={entry['task_id']}" if entry.get("task_id") else ""
+    description = f" {entry['description']}" if entry.get("description") else ""
+    return f"{entry.get('id')} {state}{task}{description}"
+
+
+def _billable_value(*, billable: bool, non_billable: bool) -> bool | None:
+    if billable and non_billable:
+        raise InvalidOperationError("--billable and --non-billable cannot be used together")
+    if billable:
+        return True
+    if non_billable:
+        return False
+    return None
+
+
+def _positive_assignee(user_id: int | None) -> int | None:
+    if user_id is not None and (isinstance(user_id, bool) or user_id <= 0):
+        raise InvalidOperationError("ASSIGNEE must be a positive integer")
+    return user_id
 
 
 def _version_callback(value: bool) -> None:
@@ -1328,6 +1378,301 @@ def delete_task(
         operation,
         json_result=lambda task_id: {"deleted": True, "task_id": task_id},
         text_result=lambda task_id: f"Deleted {task_id}",
+    )
+
+
+@time_app.command("current")
+def current_time(
+    context: typer.Context,
+    workspace_id: str = typer.Option(..., "--workspace-id", metavar="WORKSPACE_ID"),
+    assignee: int | None = typer.Option(None, "--assignee", metavar="USER_ID"),
+) -> None:
+    """Show the authenticated user's current timer, or another user's when authorized."""
+
+    state = _state(context)
+
+    def operation() -> JsonObject | None:
+        native_workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        user_id = _positive_assignee(assignee)
+        return _with_client(
+            state,
+            lambda client: TimeTrackingService(client).current(
+                native_workspace_id, assignee=user_id
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda entry: {"entry": entry},
+        text_result=lambda entry: (
+            _time_entry_text(entry) if entry is not None else "No running timer"
+        ),
+    )
+
+
+@time_app.command("list")
+def list_time(
+    context: typer.Context,
+    workspace_id: str = typer.Option(..., "--workspace-id", metavar="WORKSPACE_ID"),
+    from_value: str = typer.Option(
+        ..., "--from", metavar="FROM", help="Inclusive date or timezone-aware timestamp."
+    ),
+    to_value: str = typer.Option(
+        ..., "--to", metavar="TO", help="Exclusive date or timezone-aware timestamp."
+    ),
+    assignee: int | None = typer.Option(None, "--assignee", metavar="USER_ID"),
+    task: str | None = typer.Option(None, "--task", metavar="TASK_REF"),
+    space_id: str | None = typer.Option(None, "--space-id", metavar="SPACE_ID"),
+    folder_id: str | None = typer.Option(None, "--folder-id", metavar="FOLDER_ID"),
+    list_id: str | None = typer.Option(None, "--list-id", metavar="LIST_ID"),
+    billable: bool = typer.Option(False, "--billable", help="Only billable entries."),
+    non_billable: bool = typer.Option(False, "--non-billable", help="Only non-billable entries."),
+) -> None:
+    """List entries in a bounded start-inclusive, end-exclusive interval."""
+
+    state = _state(context)
+
+    def operation() -> TimeListResult:
+        native_workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        locations = [task, space_id, folder_id, list_id]
+        if sum(value is not None for value in locations) > 1:
+            raise InvalidOperationError(
+                "Only one of --task, --space-id, --folder-id, or --list-id may be used"
+            )
+        requested_range = parse_time_range(from_value, to_value)
+        task_id = parse_task_ref(task) if task is not None else None
+        native_space_id = (
+            validate_numeric_id(space_id, label="SPACE_ID") if space_id is not None else None
+        )
+        native_folder_id = (
+            validate_numeric_id(folder_id, label="FOLDER_ID") if folder_id is not None else None
+        )
+        native_list_id = (
+            validate_numeric_id(list_id, label="LIST_ID") if list_id is not None else None
+        )
+        user_id = _positive_assignee(assignee)
+        billable_state = _billable_value(billable=billable, non_billable=non_billable)
+        return _with_client(
+            state,
+            lambda client: TimeTrackingService(client).list_entries(
+                native_workspace_id,
+                requested_range,
+                assignee=user_id,
+                task_id=task_id,
+                space_id=native_space_id,
+                folder_id=native_folder_id,
+                list_id=native_list_id,
+                billable=billable_state,
+            ),
+        )
+
+    def json_result(result: TimeListResult) -> JsonObject:
+        return {
+            "entries": cast(list[JsonValue], result.entries),
+            "from_ms": result.start_ms,
+            "range_semantics": "start-inclusive,end-exclusive",
+            "to_ms": result.end_ms,
+            "workspace_id": result.workspace_id,
+        }
+
+    def text_result(result: TimeListResult) -> str:
+        if not result.entries:
+            return "No time entries"
+        return "\n".join(_time_entry_text(entry) for entry in result.entries)
+
+    _execute(state, operation, json_result=json_result, text_result=text_result)
+
+
+@time_app.command("start")
+def start_time(
+    context: typer.Context,
+    workspace_id: str = typer.Option(..., "--workspace-id", metavar="WORKSPACE_ID"),
+    task: str | None = typer.Option(None, "--task", metavar="TASK_REF"),
+    description: str | None = typer.Option(None, "--description", metavar="TEXT"),
+    billable: bool = typer.Option(False, "--billable"),
+    non_billable: bool = typer.Option(False, "--non-billable"),
+) -> None:
+    """Start one timer after proving that no timer is already running."""
+
+    state = _state(context)
+
+    def operation() -> TimeMutationResult:
+        native_workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        task_id = parse_task_ref(task) if task is not None else None
+        billable_state = _billable_value(billable=billable, non_billable=non_billable)
+        return _with_client(
+            state,
+            lambda client: TimeTrackingService(client).start(
+                native_workspace_id,
+                task_id=task_id,
+                description=description,
+                billable=billable_state,
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=_time_mutation_json,
+        text_result=lambda result: f"Started {result.entry.get('id')}",
+    )
+
+
+@time_app.command("stop")
+def stop_time(
+    context: typer.Context,
+    workspace_id: str = typer.Option(..., "--workspace-id", metavar="WORKSPACE_ID"),
+) -> None:
+    """Stop and verify the current timer, or return an idempotent no-op."""
+
+    state = _state(context)
+
+    def operation() -> StopTimeResult:
+        native_workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        return _with_client(
+            state, lambda client: TimeTrackingService(client).stop(native_workspace_id)
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: {
+            "entry": result.entry,
+            "entry_id": result.entry_id,
+            "stopped": result.stopped,
+        },
+        text_result=lambda result: (
+            f"Stopped {result.entry_id}" if result.stopped else "No running timer (no change)"
+        ),
+    )
+
+
+@time_app.command("add")
+def add_time(
+    context: typer.Context,
+    workspace_id: str = typer.Option(..., "--workspace-id", metavar="WORKSPACE_ID"),
+    start_at: str = typer.Option(..., "--start", metavar="DATETIME"),
+    duration_value: str = typer.Option(..., "--duration", metavar="DURATION"),
+    task: str | None = typer.Option(None, "--task", metavar="TASK_REF"),
+    description: str | None = typer.Option(None, "--description", metavar="TEXT"),
+    billable: bool = typer.Option(False, "--billable"),
+    non_billable: bool = typer.Option(False, "--non-billable"),
+) -> None:
+    """Create one completed entry and verify every explicitly requested field."""
+
+    state = _state(context)
+
+    def operation() -> TimeMutationResult:
+        native_workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        requested_start = parse_time_boundary(start_at, label="START", allow_date=False)
+        requested_duration = parse_duration(duration_value)
+        task_id = parse_task_ref(task) if task is not None else None
+        billable_state = _billable_value(billable=billable, non_billable=non_billable)
+        return _with_client(
+            state,
+            lambda client: TimeTrackingService(client).add(
+                native_workspace_id,
+                start=requested_start,
+                duration=requested_duration,
+                task_id=task_id,
+                description=description,
+                billable=billable_state,
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=_time_mutation_json,
+        text_result=lambda result: f"Added {result.entry.get('id')}",
+    )
+
+
+@time_app.command("update")
+def update_time(
+    context: typer.Context,
+    entry_id: str = typer.Argument(..., metavar="ENTRY_ID"),
+    workspace_id: str = typer.Option(..., "--workspace-id", metavar="WORKSPACE_ID"),
+    description: str | None = typer.Option(None, "--description", metavar="TEXT"),
+    task: str | None = typer.Option(None, "--task", metavar="TASK_REF"),
+    start_at: str | None = typer.Option(None, "--start", metavar="DATETIME"),
+    duration_value: str | None = typer.Option(None, "--duration", metavar="DURATION"),
+    billable: bool = typer.Option(False, "--billable"),
+    non_billable: bool = typer.Option(False, "--non-billable"),
+) -> None:
+    """Update supported fields with the smallest valid body and verified readback."""
+
+    state = _state(context)
+
+    def operation() -> TimeMutationResult:
+        native_workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        native_entry_id = validate_native_id(entry_id, label="ENTRY_ID")
+        billable_state = _billable_value(billable=billable, non_billable=non_billable)
+        if all(
+            value is None for value in (description, task, start_at, duration_value, billable_state)
+        ):
+            raise InvalidOperationError("At least one time-entry field must be provided")
+        requested_start = (
+            parse_time_boundary(start_at, label="START", allow_date=False)
+            if start_at is not None
+            else None
+        )
+        requested_duration = parse_duration(duration_value) if duration_value is not None else None
+        task_id = parse_task_ref(task) if task is not None else None
+        return _with_client(
+            state,
+            lambda client: TimeTrackingService(client).update(
+                native_workspace_id,
+                native_entry_id,
+                description=description,
+                task_id=task_id,
+                start=requested_start,
+                duration=requested_duration,
+                billable=billable_state,
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=_time_mutation_json,
+        text_result=lambda result: (
+            f"Updated {result.entry.get('id')}"
+            if result.changed
+            else f"{result.entry.get('id')}: no change"
+        ),
+    )
+
+
+@time_app.command("delete")
+def delete_time(
+    context: typer.Context,
+    entry_id: str = typer.Argument(..., metavar="ENTRY_ID"),
+    workspace_id: str = typer.Option(..., "--workspace-id", metavar="WORKSPACE_ID"),
+    yes: bool = typer.Option(False, "--yes", help="Confirm permanent deletion."),
+) -> None:
+    """Permanently delete a time entry after explicit confirmation."""
+
+    state = _state(context)
+    if not yes:
+        _fail(state, ConfirmationError("Refusing to delete without --yes"))
+
+    def operation() -> str:
+        native_workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        native_entry_id = validate_native_id(entry_id, label="ENTRY_ID")
+
+        def remove(client: ClickUpClient) -> str:
+            TimeTrackingService(client).delete(native_workspace_id, native_entry_id)
+            return native_entry_id
+
+        return _with_client(state, remove)
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda deleted_id: {"deleted": True, "entry_id": deleted_id},
+        text_result=lambda deleted_id: f"Deleted {deleted_id}",
     )
 
 

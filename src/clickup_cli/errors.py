@@ -93,6 +93,18 @@ class InvalidPriorityError(ClickUpCLIError):
     error_type = "invalid_priority"
 
 
+class InvalidTimeRangeError(ClickUpCLIError):
+    """A time boundary or requested range is invalid or unsafe."""
+
+    error_type = "invalid_time_range"
+
+
+class InvalidDurationError(ClickUpCLIError):
+    """A human duration cannot be represented by the ClickUp API."""
+
+    error_type = "invalid_duration"
+
+
 class InvalidOperationError(ClickUpCLIError):
     """An operation input is unsafe or unsupported."""
 
