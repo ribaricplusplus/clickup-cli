@@ -26,6 +26,7 @@ from clickup_cli.errors import (
     BatchManifestError,
     BatchPartialFailureError,
     ClickUpCLIError,
+    InvalidOperationError,
     InvalidStatusError,
 )
 from clickup_cli.refs import parse_task_ref
@@ -533,6 +534,75 @@ def _preflight_payload(preflight: _Preflight) -> JsonObject:
     }
 
 
+def _batch_space_id(
+    list_payload: JsonObject,
+    *,
+    line: int,
+    task_id: str,
+    list_id: str,
+) -> str:
+    raw_space = list_payload.get("space")
+    raw_space_id = raw_space.get("id") if isinstance(raw_space, dict) else None
+    if (
+        isinstance(raw_space_id, bool)
+        or not isinstance(raw_space_id, (str, int))
+        or not str(raw_space_id)
+        or not str(raw_space_id).isascii()
+        or not str(raw_space_id).isdecimal()
+        or int(str(raw_space_id)) <= 0
+        or str(int(str(raw_space_id))) != str(raw_space_id)
+    ):
+        raise InvalidOperationError(
+            f"Manifest line {line}: List {list_id} is missing its owning Space",
+            details={
+                "line": line,
+                "list_id": list_id,
+                "space_id": None,
+                "task_id": task_id,
+            },
+        )
+    return str(raw_space_id)
+
+
+def _batch_space_tag_names(
+    payload: JsonObject,
+    *,
+    line: int,
+    task_id: str,
+    list_id: str,
+    space_id: str,
+) -> list[str]:
+    details: dict[str, JsonValue] = {
+        "line": line,
+        "list_id": list_id,
+        "space_id": space_id,
+        "task_id": task_id,
+    }
+    raw_tags = payload.get("tags")
+    if not isinstance(raw_tags, list):
+        raise InvalidOperationError(
+            f"Manifest line {line}: Space {space_id} returned an invalid tag catalog",
+            details=details,
+        )
+    tags: list[str] = []
+    for raw_tag in raw_tags:
+        if not isinstance(raw_tag, dict):
+            raise InvalidOperationError(
+                f"Manifest line {line}: Space {space_id} returned invalid tag metadata",
+                details=details,
+            )
+        name = raw_tag.get("name")
+        foreground = raw_tag.get("tag_fg")
+        background = raw_tag.get("tag_bg")
+        if not all(isinstance(value, str) and value for value in (name, foreground, background)):
+            raise InvalidOperationError(
+                f"Manifest line {line}: Space {space_id} returned invalid tag metadata",
+                details=details,
+            )
+        tags.append(str(name))
+    return tags
+
+
 class BatchService:
     """Perform a complete read-only preflight before optional verified writes."""
 
@@ -558,18 +628,18 @@ class BatchService:
                 )
             fetched.append((entry, task, task_name))
 
-        list_cache: dict[str, list[str]] = {}
+        list_cache: dict[str, JsonObject] = {}
+        space_tag_cache: dict[str, list[str]] = {}
         preflight_tasks: list[_PreflightTask] = []
         for entry, task, task_name in fetched:
             operations = list(entry.operations)
             if any(operation.kind == "set_status" for operation in operations):
                 list_id = task_list_id(task)
-                labels = list_cache.get(list_id)
-                if labels is None:
-                    labels = [
-                        status.label for status in list_statuses(self._client.get_list(list_id))
-                    ]
-                    list_cache[list_id] = labels
+                list_payload = list_cache.get(list_id)
+                if list_payload is None:
+                    list_payload = self._client.get_list(list_id)
+                    list_cache[list_id] = list_payload
+                labels = [status.label for status in list_statuses(list_payload)]
                 for index, operation in enumerate(operations):
                     if operation.kind != "set_status":
                         continue
@@ -589,6 +659,77 @@ class BatchService:
                             },
                         )
                     operations[index] = replace(operation, value=matches[0])
+
+            tag_state = task_tag_names(task)
+            for index, operation in enumerate(operations):
+                if operation.kind not in {"add_tag", "remove_tag"}:
+                    continue
+                requested = cast(str, operation.value)
+                existing = next(
+                    (tag for tag in tag_state if tag.casefold() == requested.casefold()),
+                    None,
+                )
+                if operation.kind == "remove_tag":
+                    if existing is not None:
+                        tag_state = [
+                            tag for tag in tag_state if tag.casefold() != requested.casefold()
+                        ]
+                        operations[index] = replace(operation, value=existing)
+                    continue
+                if existing is not None:
+                    operations[index] = replace(operation, value=existing)
+                    continue
+
+                list_id = task_list_id(task)
+                list_payload = list_cache.get(list_id)
+                if list_payload is None:
+                    list_payload = self._client.get_list(list_id)
+                    list_cache[list_id] = list_payload
+                space_id = _batch_space_id(
+                    list_payload,
+                    line=entry.line,
+                    task_id=entry.task_id,
+                    list_id=list_id,
+                )
+                catalog = space_tag_cache.get(space_id)
+                if catalog is None:
+                    try:
+                        catalog_payload = self._client.get_space_tags(space_id)
+                    except ClickUpCLIError as exc:
+                        exc.details.update(
+                            {
+                                "line": entry.line,
+                                "list_id": list_id,
+                                "space_id": space_id,
+                                "task_id": entry.task_id,
+                            }
+                        )
+                        raise
+                    catalog = _batch_space_tag_names(
+                        catalog_payload,
+                        line=entry.line,
+                        task_id=entry.task_id,
+                        list_id=list_id,
+                        space_id=space_id,
+                    )
+                    space_tag_cache[space_id] = catalog
+                matches = [tag for tag in catalog if tag.casefold() == requested.casefold()]
+                if len(matches) != 1:
+                    qualifier = "missing" if not matches else "ambiguous"
+                    raise InvalidOperationError(
+                        f"Manifest line {entry.line}: tag {requested!r} is {qualifier} in "
+                        f"Space {space_id}",
+                        details={
+                            "line": entry.line,
+                            "list_id": list_id,
+                            "space_id": space_id,
+                            "tag": requested,
+                            "task_id": entry.task_id,
+                        },
+                    )
+                canonical = matches[0]
+                operations[index] = replace(operation, value=canonical)
+                tag_state.append(canonical)
             resolved_entry = replace(entry, operations=tuple(operations))
             state = _initial_state(task, operations)
             changes = tuple(_planned_change(state, operation) for operation in operations)

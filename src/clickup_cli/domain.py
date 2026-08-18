@@ -23,7 +23,12 @@ from clickup_cli.errors import (
     VerificationError,
 )
 from clickup_cli.refs import validate_native_id
-from clickup_cli.task_mutations import priority_display, start_date_display, task_start_date
+from clickup_cli.task_mutations import (
+    logical_task_description,
+    priority_display,
+    start_date_display,
+    task_start_date,
+)
 from clickup_cli.types import JsonObject, JsonValue
 
 _COMPLETION_LABELS = ("completed", "complete", "done", "closed")
@@ -356,7 +361,7 @@ def summarize_task(task: JsonObject) -> JsonObject:
         "archived": raw_archived if isinstance(raw_archived, bool) else None,
         "assignees": assignees,
         "attachments": cast(list[JsonValue], attachments),
-        "description": str(raw_description) if isinstance(raw_description, str) else None,
+        "description": logical_task_description(raw_description),
         "due_date": due_date_display,
         "due_date_ms": due_date.milliseconds,
         "due_date_time": due_date.has_time,

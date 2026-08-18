@@ -21,6 +21,8 @@ Changelog, and the project intends to use Semantic Versioning.
   serial application, deterministic operation ordering, and structured partial-failure results.
 - Current timer and bounded time-entry reads; guarded timer start/stop; and verified manual
   time-entry add, update, and confirmation-gated delete commands.
+- Workspace time-tag and Space task-tag catalog reads used to preserve tagged time entries and to
+  validate/canonicalize all changing batch tag additions during total preflight.
 - Stable task output fields for archived state, priority, start date, and attachments in addition
   to the existing task identity, List, status, description, due date, assignee, tag, and URL fields.
 - Localhost contracts for discovery, ensure, attachments, task mutations/lifecycle, batch, and
@@ -30,7 +32,15 @@ Changelog, and the project intends to use Semantic Versioning.
 
 - Expanded the opt-in live lifecycle to prove the exact dedicated sandbox Workspace, Space, and
   List before writing, mark all run resources with a UUID, allow-list created IDs, and verify
-  ownership immediately before task or manual time-entry cleanup.
+  ownership immediately before task or manual time-entry cleanup, including an independent final
+  time-entry HTTP 404 before removing an allow-list ID.
+- Manual time creation now supports the official successful response without an ID by uniquely
+  matching a narrow date-range read; tagged updates use Workspace catalog metadata; deletion is
+  idempotent, validates the official response ID, and verifies absence.
+- Empty task-description updates now send ClickUp's required single-space clear value while
+  retaining logical empty strings in CLI, batch, verification, and output contracts.
+- Attachment-aware task creation retains a distinct known-but-unverified failed attachment ID in
+  addition to earlier fully verified upload IDs.
 - Updated the official API snapshot provenance after the 2026-08-18 re-download; the OpenAPI 3.1.0
   document remains API info version 2.0 with 83 paths and the same recorded SHA-256.
 
@@ -43,7 +53,9 @@ Changelog, and the project intends to use Semantic Versioning.
   its marker and attachment to a current run-owned sandbox task. Timer start/stop are excluded from
   live coverage to avoid interfering with a human timer.
 - Attachment downloads never forward the ClickUp authorization header and ignore ambient proxy
-  configuration, as does the direct API client.
+  configuration, as does the direct API client. Production download URLs and redirects are now
+  restricted to established ClickUp attachment hosts; private, loopback, link-local, internal,
+  deceptive, and untrusted public destinations are rejected.
 
 ## [0.1.0] - 2026-08-17
 

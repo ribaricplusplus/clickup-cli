@@ -4,9 +4,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner, Result
 
+import clickup_cli.attachments as attachment_module
 from clickup_cli.cli import app
+from clickup_cli.client import ClickUpClient
+from clickup_cli.errors import AttachmentDownloadError
 from tests.conftest import MockClickUpAPI, MultipartPart
 
 AUTH_VALUE = "attachment-auth-secret"
@@ -436,6 +440,73 @@ def test_create_attachment_failure_returns_typed_partial_outcome(
     assert error["uploaded_attachment_ids"] == ["first-id"]
 
 
+def test_create_second_upload_readback_failure_preserves_known_failed_attachment_id(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+) -> None:
+    first_path = tmp_path / "first.txt"
+    second_path = tmp_path / "second.txt"
+    first_path.write_bytes(b"first")
+    second_path.write_bytes(b"second")
+    first = attachment_payload("first-id", title="first.txt")
+    second = attachment_payload("second-id", title="second.txt")
+    mock_api.expect(
+        "POST",
+        f"/api/v2/list/{LIST_ID}/task",
+        headers=WRITE_HEADERS,
+        json_body={"name": "Known failed attachment"},
+        response_json={"id": TASK_ID},
+    )
+    expect_task(mock_api, task_payload(name="Known failed attachment"))
+    expect_upload(
+        mock_api,
+        task_id=TASK_ID,
+        filename="first.txt",
+        body=b"first",
+        response_json=first,
+    )
+    expect_task(
+        mock_api,
+        task_payload(name="Known failed attachment", attachments=[first]),
+    )
+    expect_upload(
+        mock_api,
+        task_id=TASK_ID,
+        filename="second.txt",
+        body=b"second",
+        response_json=second,
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/task/{TASK_ID}",
+        headers=READ_HEADERS,
+        response_status=503,
+        response_json={"err": "readback unavailable"},
+    )
+
+    result = invoke(
+        mock_api,
+        [
+            "task",
+            "create",
+            "Known failed attachment",
+            "--list-id",
+            LIST_ID,
+            "--attach",
+            str(first_path),
+            "--attach",
+            str(second_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "created_but_attachment_failed"
+    assert error["uploaded_attachment_ids"] == ["first-id"]
+    assert error["failed_attachment_id"] == "second-id"
+    assert error["cause_type"] == "attachment_uploaded_but_unverified"
+
+
 def test_create_with_attachment_wraps_known_id_readback_failure(
     mock_api: MockClickUpAPI, tmp_path: Path
 ) -> None:
@@ -778,6 +849,103 @@ def test_download_rejects_non_https_nonlocal_url_without_contacting_it(
     assert result.exit_code == 1
     assert json.loads(result.stderr)["error"]["type"] == "attachment_download_failed"
     assert len(mock_api.state.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://127.0.0.1/file",
+        "https://10.0.0.1/file",
+        "https://169.254.169.254/latest/meta-data",
+        "https://[::1]/file",
+        "https://[fc00::1]/file",
+        "https://[fe80::1]/file",
+        "https://service.internal/file",
+        "https://example.com/file",
+        "https://attachments.clickup.com.evil.example/file",
+        "https://clickup-attachments.com.evil.example/file",
+        "https://attachments.cl\u0131ckup.com/file",
+        "https://attachments.clickup.com@127.0.0.1/file",
+        "https://attachments.clickup.com:invalid/file",
+        "https://attachments.clickup.com/file#fragment",
+        "http://attachments.clickup.com/file",
+    ],
+)
+def test_production_download_policy_rejects_unsafe_or_untrusted_hosts(url: str) -> None:
+    with pytest.raises(AttachmentDownloadError):
+        attachment_module._validated_download_url(url, allow_localhost=False)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attachments.clickup.com/file",
+        "https://ATTACHMENTS-PUBLIC.CLICKUP.COM/file",
+        "https://clickup-attachments.com/file",
+        "https://t123456.p.clickup-attachments.com/file",
+    ],
+)
+def test_production_download_policy_accepts_only_established_clickup_hosts(url: str) -> None:
+    assert attachment_module._validated_download_url(url, allow_localhost=False) == url
+
+
+def test_production_api_base_never_enables_claimed_localhost_downloads() -> None:
+    with ClickUpClient(token=AUTH_VALUE, base_url="https://api.clickup.com/api") as client:
+        assert client.allows_local_attachment_downloads is False
+    with pytest.raises(AttachmentDownloadError):
+        attachment_module._validated_download_url(
+            "http://localhost:8080/private",
+            allow_localhost=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "redirect_target",
+    [
+        "https://127.0.0.1/private",
+        "https://10.0.0.1/private",
+        "https://169.254.169.254/latest/meta-data",
+        "https://[::1]/private",
+        "https://[fc00::1]/private",
+        "https://service.internal/private",
+        "https://example.com/private",
+        "https://attachments.clickup.com.evil.example/private",
+    ],
+)
+def test_download_revalidates_and_rejects_unsafe_redirect_targets(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+    redirect_target: str,
+) -> None:
+    origin = mock_api.base_url.removesuffix("/api")
+    attachment = attachment_payload(url=f"{origin}/redirect/unsafe")
+    expect_task(mock_api, task_payload(attachments=[attachment]))
+    mock_api.expect(
+        "GET",
+        "/redirect/unsafe",
+        headers={"Accept": "*/*"},
+        response_status=302,
+        response_headers={"Location": redirect_target},
+    )
+    output = tmp_path / "must-not-exist"
+
+    result = invoke(
+        mock_api,
+        [
+            "task",
+            "attachment",
+            "download",
+            TASK_ID,
+            ATTACHMENT_ID,
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stderr)["error"]["type"] == "attachment_download_failed"
+    assert not output.exists()
+    assert len(mock_api.state.requests) == 2
 
 
 def test_download_rejects_attachment_not_on_fetched_task(

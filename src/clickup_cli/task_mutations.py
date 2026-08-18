@@ -222,6 +222,16 @@ def read_description_file(path: Path) -> str:
         raise InvalidOperationError("Description file must contain valid UTF-8") from exc
 
 
+def logical_task_description(value: JsonValue | None) -> str | None:
+    """Normalize ClickUp's single-space clear representation to logical empty text."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise APIError("ClickUp response contains an invalid task description")
+    return "" if value in {"", " "} else value
+
+
 def _task_tags(task: JsonObject) -> list[str]:
     raw_tags = task.get("tags")
     if not isinstance(raw_tags, list):
@@ -289,9 +299,7 @@ class TaskMutationService:
             if current_name != request.name:
                 fields["name"] = request.name
         if request.description_supplied:
-            current_description: JsonValue = task.get("description")
-            if current_description is not None and not isinstance(current_description, str):
-                raise APIError("ClickUp response contains an invalid task description")
+            current_description = logical_task_description(task.get("description"))
             if current_description != request.description:
                 fields["description"] = request.description
         if request.priority_supplied and task_priority(task) != request.priority:
@@ -310,7 +318,10 @@ class TaskMutationService:
     def _verify(readback: JsonObject, request: TaskUpdateRequest, fields: JsonObject) -> None:
         if "name" in fields and readback.get("name") != request.name:
             raise VerificationError("Task name verification failed")
-        if "description" in fields and readback.get("description") != request.description:
+        if (
+            "description" in fields
+            and logical_task_description(readback.get("description")) != request.description
+        ):
             raise VerificationError("Task description verification failed")
         if "priority" in fields and task_priority(readback) != request.priority:
             raise VerificationError("Task priority verification failed")

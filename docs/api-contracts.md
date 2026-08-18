@@ -31,7 +31,9 @@ Lists, tasks, comments, tags, attachments, time tracking, and rate limits:
 - [Update Task](https://developer.clickup.com/reference/updatetask)
 - [Delete Task](https://developer.clickup.com/reference/deletetask)
 - [Create Task Attachment](https://developer.clickup.com/reference/createtaskattachment)
+- [Get Space Tags](https://developer.clickup.com/reference/getspacetags)
 - [Time Tracking](https://developer.clickup.com/reference/gettimeentrieswithinadaterange)
+- [Get Time Entry Tags](https://developer.clickup.com/reference/getalltagsfromtimeentries)
 - [Rate Limits](https://developer.clickup.com/docs/rate-limits)
 
 ## Common wire rules
@@ -63,7 +65,8 @@ API version construction is private to `ClickUpClient`; the supported direct end
 Hierarchy traversal composes the catalog reads and sorts normalized results. Scoped task traversal
 passes supported server filters and then reapplies consistent local filters. Deep search enumerates
 Lists; shallow Workspace search may use the Workspace task endpoint. Pagination rejects repeated
-pages and stops at hard page/result ceilings.
+pages and stops at hard page/result ceilings. Task-list array filters intentionally use ClickUp's
+documented `statuses[]`, `assignees[]`, and `tags[]` query spelling.
 
 Ensure has no new endpoint. It performs a List task search with closed tasks and subtasks included,
 requires zero or one exact normalized name match, and delegates the zero-match path to verified
@@ -74,7 +77,7 @@ task creation.
 | Operation | Exact write shape |
 | --- | --- |
 | Create task | `POST /api/v2/list/{list_id}/task` with `name` and only supplied `description`, `status`, `assignees`, `due_date`, `due_date_time`, and `tags` |
-| General task update | `PUT /api/v2/task/{task_id}` with only changed `name`, `description`, `priority`, `start_date`, `start_date_time`, or `archived` fields |
+| General task update | `PUT /api/v2/task/{task_id}` with only changed `name`, `description`, `priority`, `start_date`, `start_date_time`, or `archived` fields; logical empty description is wire `" "` |
 | Set status | `PUT /api/v2/task/{task_id}` with only `{"status":"<canonical label>"}` |
 | Set due date | `PUT /api/v2/task/{task_id}` with exact `due_date` milliseconds and `due_date_time` boolean |
 | Clear due date | `PUT /api/v2/task/{task_id}` with only `{"due_date":null}` |
@@ -104,12 +107,18 @@ found or the bounded search reaches the end.
 Attachment upload requires the returned ID and title on a fresh task read. Download is not a
 ClickUp API call after that authoritative read: a credential-free client follows at most five
 revalidated redirects and streams at most 100 MiB into an atomic local output operation.
+Production initial and redirect URLs require HTTPS on exact `attachments.clickup.com`, exact
+`attachments-public.clickup.com`, or the apex/subdomains of `clickup-attachments.com`. Plain HTTP
+localhost is accepted only when the configured API base is localhost.
 
 ## Batch contracts
 
-Batch adds no endpoint. Strict JSONL parsing occurs before a client is created. Plan and apply both
-perform a complete task-read preflight; any requested status also causes the relevant List read.
-Plan returns after those reads.
+Batch adds no write endpoint. Strict JSONL parsing occurs before a client is created. Plan and
+apply both perform a complete task-read preflight; any requested status causes the relevant List
+read. Every changing `add_tag` additionally resolves the task's List, its owning Space, and
+`GET /api/v2/space/{space_id}/tag` with JSON content type. List payloads and Space catalogs are
+cached, exactly one case-insensitive catalog match supplies the canonical wire name, and existing
+tag no-ops do not require a catalog. Missing, ambiguous, or invalid catalogs fail before any write.
 
 Apply requires `--yes` before reading the manifest or using credentials. After preflight, each
 operation delegates to the same task/status/due-date/assignee/tag/lifecycle service described
@@ -124,21 +133,32 @@ issued.
 | Current timer | `GET /api/v2/team/{workspace_id}/time_entries/current` with optional `assignee` |
 | Bounded list | `GET /api/v2/team/{workspace_id}/time_entries?start_date=<ms>&end_date=<ms>&...` |
 | Single entry read | `GET /api/v2/team/{workspace_id}/time_entries/{entry_id}` |
+| Workspace time tags | `GET /api/v2/team/{workspace_id}/time_entries/tags` with JSON content type |
 | Start timer | `POST /api/v2/team/{workspace_id}/time_entries/start` with only supplied `tid`, `description`, and `billable` |
 | Stop timer | `POST /api/v2/team/{workspace_id}/time_entries/stop` with an empty body |
 | Add manual entry | `POST /api/v2/team/{workspace_id}/time_entries` with exact `start`/`duration` and only supplied `tid`, `description`, and `billable` |
 | Update entry | `PUT /api/v2/team/{workspace_id}/time_entries/{entry_id}` with required preserved `tags` plus only changed supported fields |
-| Delete entry | `DELETE /api/v2/team/{workspace_id}/time_entries/{entry_id}` with an empty body |
+| Delete entry | `DELETE /api/v2/team/{workspace_id}/time_entries/{entry_id}` with an empty body; official 200 JSON `data.id` must match |
 
 Time list ranges are start-inclusive and end-exclusive and cannot exceed 366 days. Only one task,
 Space, Folder, or List location filter is sent. Current timer is read before start; an existing
 timer prevents the write. Stop captures the current ID before writing and then proves it is no
 longer current.
 
-Manual add extracts the returned ID and verifies a single-entry read. Update reads first, sends the
-smallest body ClickUp permits while preserving tag metadata, and verifies every requested field.
-Running entry timing changes are rejected. Non-idempotent/ambiguous failures carry a Workspace,
-entry, or stopped-entry ID whenever one is known.
+The official manual-add 200 body contains created fields but no ID. A directly observed `id` or
+`data.id` remains a fast path; otherwise add queries a one-second-padded range around the exact
+requested start/end, applies the task filter when supplied, and requires one exact
+start/duration/task/description/billable match, with compatible 200-body values as extra evidence.
+Zero/multiple matches are a confirmed-created `created_but_unidentified` partial outcome with
+Workspace, start, candidate IDs, and a strong no-retry warning. Exactly one ID is then verified by
+the singular read. The POST is never retried.
+
+Update reads first and sends the smallest body ClickUp permits. Complete tag objects are preserved
+directly; string-only tags are mapped case-insensitively to exactly one full
+`{name,tag_fg,tag_bg}` object from the Workspace catalog before PUT. Running entry timing changes
+are rejected. Delete pre-reads the exact entry, treats pre-read 404 as unchanged, requires the
+official 200 `data.id` to match, then requires singular-read 404. Lost/invalid delete responses or
+failed absence checks preserve `entry_id` in a typed unknown outcome.
 
 ## Live-probe and release-harness basis
 
@@ -151,8 +171,10 @@ All temporary content carries a new UUID. Cleanup maps contain only IDs returned
 Before task deletion, an exact task read must still show the sandbox List and marker in both name
 and description; deletion must be followed by HTTP 404. Before manual time-entry deletion, the
 exact captured entry must still carry the marker and point to a run-owned task whose own sandbox
-containment is re-proved. Cleanup refuses and reports the surviving ID if any proof fails. No
-pre-existing time entry is deleted, and live coverage never calls timer start or stop.
+containment is re-proved. After either the CLI callback or direct-client fallback, cleanup performs
+its own exact GET and requires HTTP 404 before removing the allow-list ID. Cleanup refuses and
+reports the surviving ID if any proof or absence check fails. No pre-existing time entry is
+deleted, and live coverage never calls timer start or stop.
 
 Ordinary tests and CI use localhost only and select `-m 'not live'`.
 

@@ -161,6 +161,62 @@ def test_update_reads_utf8_description_file_before_network(
     assert result.exit_code == 0, result.output
 
 
+def test_empty_description_option_uses_single_space_wire_clear_and_empty_output(
+    mock_api: MockClickUpAPI,
+) -> None:
+    expect_task(mock_api, task_payload())
+    expect_update(mock_api, {"description": " "})
+    expect_task(mock_api, task_payload(description=""))
+
+    result = invoke(
+        mock_api,
+        ["task", "update", TASK_ID, "--description", ""],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)["result"]
+    assert payload["changed"] is True
+    assert payload["task"]["description"] == ""
+
+
+def test_empty_description_file_uses_single_space_wire_and_accepts_space_readback(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+) -> None:
+    description_file = tmp_path / "empty.txt"
+    description_file.write_bytes(b"")
+    expect_task(mock_api, task_payload())
+    expect_update(mock_api, {"description": " "})
+    expect_task(mock_api, task_payload(description=" "))
+
+    result = invoke(
+        mock_api,
+        ["task", "update", TASK_ID, "--description-file", str(description_file)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["result"]["task"]["description"] == ""
+
+
+@pytest.mark.parametrize("readback_description", ["", " "])
+def test_empty_description_is_noop_for_both_clear_readback_representations(
+    mock_api: MockClickUpAPI,
+    readback_description: str,
+) -> None:
+    expect_task(mock_api, task_payload(description=readback_description))
+
+    result = invoke(
+        mock_api,
+        ["task", "update", TASK_ID, "--description", ""],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)["result"]
+    assert payload["changed"] is False
+    assert payload["task"]["description"] == ""
+    assert len(mock_api.state.requests) == 1
+
+
 def test_update_date_only_sets_start_date_time_false(mock_api: MockClickUpAPI) -> None:
     expect_task(mock_api, task_payload())
     expect_update(

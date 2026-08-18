@@ -54,29 +54,35 @@ new creation to `TaskService`.
 `clickup_cli.task_mutations.TaskMutationService` handles name, description, priority, start date,
 tag, and archive state. It compares requested state to a fresh task read, builds one body containing
 only changed fields, and verifies the operation-specific state afterward. Description files are
-bounded regular UTF-8 files. Tag changes use separate safely encoded endpoints and are idempotent.
+bounded regular UTF-8 files. Logical empty descriptions serialize as a single space only at the
+task PUT boundary and normalize back to empty on read. Tag changes use separate safely encoded
+endpoints and are idempotent.
 
 `clickup_cli.attachments.AttachmentService` normalizes attachments from authoritative task reads.
 Upload validates a regular local file, uses the client multipart boundary, retains known IDs in
 partial errors, and requires the returned ID/title on a fresh task read. Download first proves the
 attachment belongs to the fetched task, then uses a separate credential-free HTTP client. It
-revalidates redirect URLs, requires non-local HTTPS, bounds redirects and bytes, and atomically
+revalidates redirect URLs against the explicit ClickUp attachment-host allow-list, enables
+plaintext localhost only with a localhost API base, bounds redirects and bytes, and atomically
 installs output.
 
 `clickup_cli.time_tracking.TimeTrackingService` parses bounded UTC ranges and whole-unit durations,
 normalizes API response variants, and performs current/list/add/update/delete plus guarded
 start/stop orchestration. Non-idempotent operations distinguish an unknown outcome from a known ID.
-Updates preserve ClickUp's required tag array, reject unsafe running-entry timing changes, send the
-smallest valid body, and verify a single-entry readback.
+Official no-ID manual creates use a narrow exact-match range lookup before singular verification.
+Updates preserve ClickUp's required tag array, resolving string tags through the Workspace catalog,
+reject unsafe running-entry timing changes, send the smallest valid body, and verify a single-entry
+readback. Deletion pre-reads, validates the official response ID, and proves final absence.
 
 ### Batch composition and CLI output
 
 `clickup_cli.batch` treats the JSONL manifest as untrusted input. It bounds the file, line, and task
 counts; parses strict JSON with duplicate-key and nonstandard-constant rejection; normalizes task
 references; rejects unknown/conflicting fields; and fixes a deterministic operation order.
-`BatchService` fetches every target and validates every status before apply can write. Plan stops
-after this preflight. Apply invokes the existing verified service method for each operation,
-serially, and exposes partial progress instead of implying rollback.
+`BatchService` fetches every target, validates every status, and resolves every changing tag add
+through cached List and owning-Space catalogs before apply can write. Plan stops after this
+preflight. Apply invokes the existing verified service method for each operation, serially, and
+exposes partial progress instead of implying rollback.
 
 `clickup_cli.cli` translates Typer values into core inputs and translates service results into
 stable text or JSON. It does not reproduce domain logic. The console entry point catches Click
@@ -87,16 +93,19 @@ and 2.
 
 Every endpoint method constructs a new request body from supported supplied fields. Domain and
 focused services read only the state needed to validate, canonicalize, or minimize a mutation.
-Successful writes are not reported until a separate API read confirms the operation-specific
-invariant, except permanent deletes where the command reports the successful HTTP response.
+Successful non-delete writes are not reported until a separate API read confirms the
+operation-specific invariant. Task deletion reports its successful HTTP response. Time-entry
+deletion additionally validates the official response ID and requires a separate exact-entry 404.
 
 Create and time operations can cross a non-idempotent boundary before a response is usable. The
 error model therefore separates:
 
 - unknown outcomes, where no reliable created ID exists and callers must inspect before retrying;
+- confirmed time-entry creates whose native ID is zero-match unidentified or multi-match ambiguous,
+  with an explicit no-retry warning and candidate IDs;
 - known created IDs whose final verification failed;
-- attachment-aware task creation where the task ID and ordered uploaded attachment IDs survive a
-  later attachment failure;
+- attachment-aware task creation where the task ID, ordered verified upload IDs, and any distinct
+  known-but-unverified failed attachment ID survive a later attachment failure;
 - mutation failures that carry the affected task, time-entry, failed manifest line, or last
   verified state needed for safe inspection.
 
@@ -115,7 +124,8 @@ the first write it proves the exact configured List ID/name/Space and the Worksp
 tree. A UUID is carried in all temporary content. Run-created task and manual time-entry IDs are
 stored in ownership maps. Cleanup always fetches first, refuses an unowned or unmarked resource,
 and requires post-delete task HTTP 404. Manual time-entry cleanup also proves its task is a
-run-owned task still in the sandbox. The test never starts or stops a timer.
+run-owned task still in the sandbox and independently requires its own HTTP 404 before allow-list
+removal. The test never starts or stops a timer.
 
 Containment helpers live under `tests/` rather than the production package and have their own
 localhost contracts proving that a failed marker, List, task, or entry check issues no delete.

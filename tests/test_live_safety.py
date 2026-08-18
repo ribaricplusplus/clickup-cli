@@ -187,6 +187,79 @@ def test_live_invoke_retains_task_id_from_partial_create_error(
     assert ownership == {TASK_ID: owner}
 
 
+def test_live_invoke_retains_uniquely_matched_time_id_when_singular_read_fails(
+    mock_api: MockClickUpAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_ms = 1_767_225_600_000
+    description = MARKER
+    candidate = {
+        **time_entry_payload(description=description),
+        "billable": False,
+        "start": str(start_ms),
+        "user": {"id": 7},
+    }
+    mock_api.expect(
+        "POST",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries",
+        headers=TIME_HEADERS,
+        json_body={
+            "description": description,
+            "duration": 90_000,
+            "start": start_ms,
+            "tid": TASK_ID,
+        },
+        response_json={
+            "assignee": 7,
+            "billable": False,
+            "description": description,
+            "duration": 90_000,
+            "start": start_ms,
+            "tags": [],
+            "tid": TASK_ID,
+        },
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries?"
+        f"start_date={start_ms - 1_000}&end_date={start_ms + 91_000}&task_id={TASK_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": [candidate]},
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_status=503,
+        response_json={"err": "readback unavailable"},
+    )
+    monkeypatch.setenv("CLICKUP_API_TOKEN", AUTH_VALUE)
+    ownership: dict[str, OwnedTimeEntry] = {}
+    owner = OwnedTimeEntry(TASK_ID, MARKER)
+
+    with pytest.raises(AssertionError):
+        _invoke(
+            CliRunner(),
+            mock_api.base_url,
+            "time",
+            "add",
+            "--workspace-id",
+            WORKSPACE_ID,
+            "--start",
+            "2026-01-01T00:00:00Z",
+            "--duration",
+            "90s",
+            "--task",
+            TASK_ID,
+            "--description",
+            description,
+            owned_time_entries=ownership,
+            expected_time_entry=owner,
+        )
+
+    assert ownership == {ENTRY_ID: owner}
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -234,7 +307,14 @@ def test_owned_time_entry_cleanup_proves_entry_and_task_before_exact_delete(
         "DELETE",
         f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
         headers=TIME_HEADERS,
-        response_json={},
+        response_json={"data": time_entry_payload()},
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_status=404,
+        response_json={"err": "not found"},
     )
 
     with ClickUpClient(token=AUTH_VALUE, base_url=mock_api.base_url) as client:
@@ -246,6 +326,80 @@ def test_owned_time_entry_cleanup_proves_entry_and_task_before_exact_delete(
             {TASK_ID: OwnedTask(MARKER)},
             sandbox_list_id=LIST_ID,
         )
+
+
+def test_owned_time_entry_cleanup_independently_checks_404_after_cli_callback(
+    mock_api: MockClickUpAPI,
+) -> None:
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": time_entry_payload()},
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/task/{TASK_ID}",
+        headers=READ_HEADERS,
+        response_json=task_payload(),
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_status=404,
+        response_json={"err": "not found"},
+    )
+    deleted: list[str] = []
+
+    with ClickUpClient(token=AUTH_VALUE, base_url=mock_api.base_url) as client:
+        delete_owned_time_entry(
+            client,
+            WORKSPACE_ID,
+            ENTRY_ID,
+            {ENTRY_ID: OwnedTimeEntry(TASK_ID, MARKER)},
+            {TASK_ID: OwnedTask(MARKER)},
+            sandbox_list_id=LIST_ID,
+            delete=lambda target: deleted.append(target),
+        )
+
+    assert deleted == [ENTRY_ID]
+
+
+def test_owned_time_entry_cleanup_refuses_to_finish_when_entry_remains(
+    mock_api: MockClickUpAPI,
+) -> None:
+    payload = time_entry_payload()
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": payload},
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/task/{TASK_ID}",
+        headers=READ_HEADERS,
+        response_json=task_payload(),
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": payload},
+    )
+
+    with ClickUpClient(token=AUTH_VALUE, base_url=mock_api.base_url) as client:
+        with pytest.raises(LiveContainmentError, match="did not produce HTTP 404"):
+            delete_owned_time_entry(
+                client,
+                WORKSPACE_ID,
+                ENTRY_ID,
+                {ENTRY_ID: OwnedTimeEntry(TASK_ID, MARKER)},
+                {TASK_ID: OwnedTask(MARKER)},
+                sandbox_list_id=LIST_ID,
+                delete=lambda _target: None,
+            )
 
 
 @pytest.mark.parametrize(

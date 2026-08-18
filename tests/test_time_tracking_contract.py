@@ -781,16 +781,103 @@ def test_add_minimal_exact_body(mock_api: MockClickUpAPI) -> None:
     assert result.stdout.strip() == f"Added {ENTRY_ID}"
 
 
-@pytest.mark.parametrize("response", [{}, {"duration": 90_000}, {"data": {}}])
-def test_add_success_without_id_is_typed_unknown(
-    mock_api: MockClickUpAPI, response: dict[str, Any]
+def test_add_official_no_id_response_finds_unique_entry_then_reads_it_back(
+    mock_api: MockClickUpAPI,
 ) -> None:
     mock_api.expect(
         "POST",
         f"/api/v2/team/{WORKSPACE_ID}/time_entries",
         headers=TIME_HEADERS,
-        json_body={"duration": 90_000, "start": START_MS},
-        response_json=response,
+        json_body={
+            "billable": True,
+            "description": "unique-manual-entry",
+            "duration": 90_000,
+            "start": START_MS,
+            "tid": TASK_ID,
+        },
+        response_json={
+            "assignee": 7,
+            "billable": True,
+            "description": "unique-manual-entry",
+            "duration": 90_000,
+            "start": START_MS,
+            "tags": [],
+            "tid": TASK_ID,
+        },
+    )
+    created = entry_payload(
+        duration=90_000,
+        description="unique-manual-entry",
+        billable=True,
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries?"
+        f"start_date={START_MS - 1_000}&end_date={START_MS + 91_000}&task_id={TASK_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": [created]},
+    )
+    expect_entry(mock_api, created)
+
+    result = invoke(
+        mock_api,
+        [
+            "time",
+            "add",
+            "--workspace-id",
+            WORKSPACE_ID,
+            "--start",
+            "2026-01-01T00:00:00Z",
+            "--duration",
+            "90s",
+            "--task",
+            TASK_ID,
+            "--description",
+            "unique-manual-entry",
+            "--billable",
+        ],
+        json_output=True,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["result"]["entry"]["id"] == ENTRY_ID
+
+
+@pytest.mark.parametrize("match_count", [0, 2])
+def test_add_official_no_id_response_reports_unidentified_or_ambiguous_without_retry(
+    mock_api: MockClickUpAPI,
+    match_count: int,
+) -> None:
+    mock_api.expect(
+        "POST",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries",
+        headers=TIME_HEADERS,
+        json_body={"description": "unique-description", "duration": 90_000, "start": START_MS},
+        response_json={
+            "assignee": 7,
+            "billable": False,
+            "description": "unique-description",
+            "duration": 90_000,
+            "start": START_MS,
+            "tags": [],
+            "tid": "",
+        },
+    )
+    candidates = [
+        entry_payload(
+            entry_id=f"candidate-{index}",
+            task_id=None,
+            duration=90_000,
+            description="unique-description",
+        )
+        for index in range(match_count)
+    ]
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries?"
+        f"start_date={START_MS - 1_000}&end_date={START_MS + 91_000}",
+        headers=TIME_HEADERS,
+        response_json={"data": candidates},
     )
 
     result = invoke(
@@ -804,12 +891,21 @@ def test_add_success_without_id_is_typed_unknown(
             "2026-01-01T00:00:00Z",
             "--duration",
             "90s",
+            "--description",
+            "unique-description",
         ],
         json_output=True,
     )
 
     assert result.exit_code == 1
-    assert json.loads(result.stderr)["error"]["type"] == "outcome_unknown"
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "created_but_unidentified"
+    assert error["workspace_id"] == WORKSPACE_ID
+    assert error["start_ms"] == START_MS
+    assert error["retry_safe"] is False
+    assert error["candidate_ids"] == [f"candidate-{index}" for index in range(match_count)]
+    assert "DO NOT RETRY" in error["message"]
+    assert len([request for request in mock_api.state.requests if request.method == "POST"]) == 1
 
 
 def test_add_known_id_readback_failure_is_created_but_unverified(
@@ -1044,10 +1140,36 @@ def test_update_duration_only_uses_documented_duration_field(
     assert result.exit_code == 0, result.output
 
 
-def test_update_rejects_unrepresentable_existing_tags_before_put(
+def test_update_string_tags_use_workspace_catalog_metadata(
     mock_api: MockClickUpAPI,
 ) -> None:
     expect_entry(mock_api, entry_payload(tags=["focus"]))
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/tags",
+        headers=TIME_HEADERS,
+        response_json={
+            "data": [
+                {
+                    "creator": 7,
+                    "name": "Focus",
+                    "tag_bg": "#000000",
+                    "tag_fg": "#ffffff",
+                }
+            ]
+        },
+    )
+    mock_api.expect(
+        "PUT",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        json_body={
+            "description": "Updated",
+            "tags": [{"name": "Focus", "tag_bg": "#000000", "tag_fg": "#ffffff"}],
+        },
+        response_json={},
+    )
+    expect_entry(mock_api, entry_payload(description="Updated", tags=["Focus"]))
 
     result = invoke(
         mock_api,
@@ -1062,8 +1184,107 @@ def test_update_rejects_unrepresentable_existing_tags_before_put(
         ],
     )
 
+    assert result.exit_code == 0, result.output
+
+
+def test_update_string_tags_fetches_one_catalog_and_preserves_canonical_metadata(
+    mock_api: MockClickUpAPI,
+) -> None:
+    expect_entry(mock_api, entry_payload(tags=["FOCUS", "deep work"]))
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/tags",
+        headers=TIME_HEADERS,
+        response_json={
+            "data": [
+                {"creator": 7, "name": "Focus", "tag_bg": "#111111", "tag_fg": "#eeeeee"},
+                {
+                    "creator": 7,
+                    "name": "Deep Work",
+                    "tag_bg": "#222222",
+                    "tag_fg": "#dddddd",
+                },
+            ]
+        },
+    )
+    mock_api.expect(
+        "PUT",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        json_body={
+            "description": "Updated",
+            "tags": [
+                {"name": "Focus", "tag_bg": "#111111", "tag_fg": "#eeeeee"},
+                {"name": "Deep Work", "tag_bg": "#222222", "tag_fg": "#dddddd"},
+            ],
+        },
+        response_json={},
+    )
+    expect_entry(mock_api, entry_payload(description="Updated", tags=["Focus", "Deep Work"]))
+
+    result = invoke(
+        mock_api,
+        [
+            "time",
+            "update",
+            ENTRY_ID,
+            "--workspace-id",
+            WORKSPACE_ID,
+            "--description",
+            "Updated",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    catalog_requests = [
+        request for request in mock_api.state.requests if request.path.endswith("/tags")
+    ]
+    assert len(catalog_requests) == 1
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        {"data": []},
+        {
+            "data": [
+                {"name": "Focus", "tag_bg": "#111111", "tag_fg": "#eeeeee"},
+                {"name": "focus", "tag_bg": "#222222", "tag_fg": "#dddddd"},
+            ]
+        },
+        {"data": [{"name": "Focus", "tag_bg": "#111111"}]},
+        {"data": "invalid"},
+    ],
+)
+def test_update_tag_catalog_failures_happen_before_put(
+    mock_api: MockClickUpAPI,
+    catalog: dict[str, Any],
+) -> None:
+    expect_entry(mock_api, entry_payload(tags=["focus"]))
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/tags",
+        headers=TIME_HEADERS,
+        response_json=catalog,
+    )
+
+    result = invoke(
+        mock_api,
+        [
+            "time",
+            "update",
+            ENTRY_ID,
+            "--workspace-id",
+            WORKSPACE_ID,
+            "--description",
+            "Updated",
+        ],
+        json_output=True,
+    )
+
     assert result.exit_code == 1
-    assert "omitted tag colors" in result.stderr
+    assert json.loads(result.stderr)["error"]["type"] == "invalid_operation"
+    assert all(request.method != "PUT" for request in mock_api.state.requests)
 
 
 def test_update_rejects_timing_change_on_running_entry(mock_api: MockClickUpAPI) -> None:
@@ -1158,12 +1379,20 @@ def test_delete_requires_confirmation_before_any_network(mock_api: MockClickUpAP
 
 
 def test_delete_exact_localhost_contract(mock_api: MockClickUpAPI) -> None:
+    current = entry_payload()
+    expect_entry(mock_api, current)
     mock_api.expect(
         "DELETE",
         f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
         headers=TIME_HEADERS,
-        response_status=204,
-        response_json=None,
+        response_json={"data": current},
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_status=404,
+        response_json={"err": "not found"},
     )
 
     result = invoke(
@@ -1173,10 +1402,143 @@ def test_delete_exact_localhost_contract(mock_api: MockClickUpAPI) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == {
-        "ok": True,
-        "result": {"deleted": True, "entry_id": ENTRY_ID},
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["result"]["changed"] is True
+    assert payload["result"]["deleted"] is True
+    assert payload["result"]["entry_id"] == ENTRY_ID
+    assert payload["result"]["entry"]["id"] == ENTRY_ID
+
+
+def test_delete_already_absent_is_idempotent_noop(mock_api: MockClickUpAPI) -> None:
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_status=404,
+        response_json={"err": "not found"},
+    )
+
+    result = invoke(
+        mock_api,
+        ["time", "delete", ENTRY_ID, "--workspace-id", WORKSPACE_ID, "--yes"],
+        json_output=True,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["result"] == {
+        "changed": False,
+        "deleted": False,
+        "entry": None,
+        "entry_id": ENTRY_ID,
     }
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"data": {}},
+        {"data": {"id": "different-entry"}},
+    ],
+)
+def test_delete_missing_or_wrong_response_id_is_outcome_unknown(
+    mock_api: MockClickUpAPI,
+    response: dict[str, Any],
+) -> None:
+    expect_entry(mock_api, entry_payload())
+    mock_api.expect(
+        "DELETE",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json=response,
+    )
+
+    result = invoke(
+        mock_api,
+        ["time", "delete", ENTRY_ID, "--workspace-id", WORKSPACE_ID, "--yes"],
+        json_output=True,
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "outcome_unknown"
+    assert error["entry_id"] == ENTRY_ID
+
+
+def test_delete_transport_loss_is_outcome_unknown(mock_api: MockClickUpAPI) -> None:
+    expect_entry(mock_api, entry_payload())
+    mock_api.expect(
+        "DELETE",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        disconnect=True,
+    )
+
+    result = invoke(
+        mock_api,
+        ["time", "delete", ENTRY_ID, "--workspace-id", WORKSPACE_ID, "--yes"],
+        json_output=True,
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "outcome_unknown"
+    assert error["entry_id"] == ENTRY_ID
+
+
+def test_delete_still_present_after_valid_response_fails_verification(
+    mock_api: MockClickUpAPI,
+) -> None:
+    current = entry_payload()
+    expect_entry(mock_api, current)
+    mock_api.expect(
+        "DELETE",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": current},
+    )
+    expect_entry(mock_api, current)
+
+    result = invoke(
+        mock_api,
+        ["time", "delete", ENTRY_ID, "--workspace-id", WORKSPACE_ID, "--yes"],
+        json_output=True,
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "verification_failed"
+    assert error["entry_id"] == ENTRY_ID
+
+
+def test_delete_failed_absence_read_is_outcome_unknown(mock_api: MockClickUpAPI) -> None:
+    current = entry_payload()
+    expect_entry(mock_api, current)
+    mock_api.expect(
+        "DELETE",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": current},
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_status=503,
+        response_json={"err": "unavailable"},
+    )
+
+    result = invoke(
+        mock_api,
+        ["time", "delete", ENTRY_ID, "--workspace-id", WORKSPACE_ID, "--yes"],
+        json_output=True,
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "outcome_unknown"
+    assert error["entry_id"] == ENTRY_ID
 
 
 def test_time_errors_redact_authorization_value(mock_api: MockClickUpAPI) -> None:

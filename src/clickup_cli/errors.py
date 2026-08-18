@@ -63,6 +63,12 @@ class CreatedButUnverifiedError(ClickUpCLIError):
     error_type = "created_but_unverified"
 
 
+class CreatedButUnidentifiedError(ClickUpCLIError):
+    """A create succeeded, but its native ID could not be identified uniquely."""
+
+    error_type = "created_but_unidentified"
+
+
 class CreatedButAttachmentFailedError(ClickUpCLIError):
     """A task was created, but one of its requested attachments did not finish safely."""
 

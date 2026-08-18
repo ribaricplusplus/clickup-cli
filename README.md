@@ -162,8 +162,10 @@ Non-idempotent partial outcomes are explicit:
   List before retrying.
 - `created_but_unverified` contains `task_id`; the task exists but task readback or normalization
   did not finish safely.
-- `created_but_attachment_failed` contains `task_id`, `failed_path`, and the ordered
-  `uploaded_attachment_ids`. Inspect that task before retrying any attachment.
+- `created_but_attachment_failed` contains `task_id`, `failed_path`, the ordered verified
+  `uploaded_attachment_ids`, and the nested `cause_type`. If the failed upload returned an ID but
+  its readback failed, distinct `failed_attachment_id` preserves that known-but-unverified ID.
+  Inspect that task before retrying any attachment.
 - Standalone uploads distinguish `attachment_outcome_unknown` from
   `attachment_uploaded_but_unverified`, which includes the known attachment ID when available.
 
@@ -200,7 +202,9 @@ clickup task start-date clear '<task-id>'
 Priority values are `urgent`, `high`, `normal`, `low`, or `clear`. A description file must be a
 regular UTF-8 file no larger than 1 MiB. Due and start dates accept `YYYY-MM-DD` or an ISO 8601
 timestamp with `Z` or an explicit offset. Date-only values preserve date semantics; timed values
-are normalized to an exact UTC instant.
+are normalized to an exact UTC instant. Logical empty descriptions remain `""` in CLI, batch,
+and output contracts; task update serializes that clear request as ClickUp's required single space
+and accepts either empty or single-space cleared readback.
 
 Other idempotent and verified task mutations include:
 
@@ -250,8 +254,12 @@ clickup task attachment download '<task-id>' '<attachment-id>' --output ./eviden
 
 Upload accepts one regular readable file and a plain optional upload name. Download first fetches
 the task and requires that exact attachment ID, then fetches its URL without the ClickUp token.
-Non-local URLs require HTTPS, redirects are revalidated, output is installed atomically, existing
-files require `--force`, and the download ceiling is 100 MiB.
+Production URLs and every redirect require HTTPS plus an exact trusted attachment host:
+`attachments.clickup.com`, `attachments-public.clickup.com`, or the apex/subdomains of
+`clickup-attachments.com`. Private, loopback, link-local, internal, deceptive, and other public
+hosts are rejected. Plain HTTP localhost is enabled only when the configured API base is itself
+localhost for socket contracts. Output is installed atomically, existing files require `--force`,
+and the download ceiling is 100 MiB.
 
 ## Strict batch JSONL
 
@@ -288,8 +296,10 @@ clickup task batch plan ./changes.jsonl
 ```
 
 Apply requires confirmation. It loads the same strict manifest, completes preflight reads and
-status validation for every task before the first write, then applies operations serially with the
-same verified single-operation services used by interactive commands:
+status validation for every task, and resolves every changing tag addition through cached owning
+List and Space tag catalogs before the first write. Tag names are case-insensitively canonicalized;
+existing-tag no-ops require no catalog. It then applies operations serially with the same verified
+single-operation services used by interactive commands:
 
 ```console
 clickup task batch apply ./changes.jsonl --yes
@@ -341,10 +351,19 @@ clickup time update '<entry-id>' --workspace-id '<workspace-id>' \
 clickup time delete '<entry-id>' --workspace-id '<workspace-id>' --yes
 ```
 
-Add returns and verifies the created entry ID. Update reads first, preserves the API-required tag
-array, writes only changed supported fields, and verifies the readback. Timing changes on a running
-entry fail closed. Delete is permanent and confirmation-gated. Unknown create/start/update/stop
-outcomes preserve every known entry ID so automation can inspect rather than retry blindly.
+ClickUp's official manual-entry success body has no ID. Add therefore accepts an observed direct
+ID as a fast path, otherwise searches a narrow start range (with the task filter when supplied),
+requires one exact start/duration/task/description/billable match, then verifies that ID through a
+single-entry read. Zero or multiple matches return `created_but_unidentified` with Workspace,
+start, candidate IDs, and `retry_safe:false`; do not retry because the POST already succeeded.
+
+Update reads first, preserves the API-required tag array, and maps string-only singular-read tags
+through the Workspace time-tag catalog before writing. Empty tags need no catalog and complete tag
+objects remain accepted. Delete pre-reads the exact ID, treats an initial 404 as an idempotent
+no-op, validates the official deleted `data.id`, and independently requires a final 404. Ambiguous
+delete responses or absence checks return `outcome_unknown` with `entry_id`. Timing changes on a
+running entry fail closed. Unknown create/start/update/stop outcomes preserve every known entry ID
+so automation can inspect rather than retry blindly.
 
 ## Stable JSON contracts
 
@@ -389,6 +408,7 @@ The principal safety properties are:
 - supported writes are followed by operation-specific readback checks;
 - pagination, input files, downloads, retries, time ranges, and batch sizes are bounded;
 - non-idempotent partial outcomes distinguish unknown outcomes from known created IDs;
+- production attachment sockets are restricted to established ClickUp attachment hosts;
 - task, batch, and time-entry deletion paths require explicit confirmation;
 - ordinary tests reject every non-local network connection.
 
@@ -428,9 +448,11 @@ Every run-created task name and description, attachment, batch manifest, and man
 description contains one UUID marker. Only IDs returned by the current run enter cleanup
 allow-lists. Before every task deletion, the test fetches the exact task and re-proves its sandbox
 List plus both task markers; after deletion it requires HTTP 404. A manual time entry is fetched and
-marker/task-verified against a run-owned sandbox task before its captured ID can be deleted. If
-proof fails, cleanup refuses deletion and reports the surviving ID. A `finally` block handles
-structured partial-create IDs and removes manual entries before tasks.
+marker/task-verified against a run-owned sandbox task before its captured ID can be deleted;
+cleanup independently requires HTTP 404 after either the CLI delete callback or direct-client
+fallback before removing the ID from its allow-list. If proof or absence fails, cleanup reports the
+surviving ID. A `finally` block handles structured partial-create IDs and removes manual entries
+before tasks.
 
 The lifecycle covers discovery, ensure create/no-op, scoped list/search, attachment byte-equality,
 task fields/tags/archive, comments/due-date/assignment/status/completion, batch plan/apply, current

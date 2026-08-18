@@ -47,6 +47,7 @@ from clickup_cli.domain import (
 )
 from clickup_cli.errors import (
     APIError,
+    AttachmentUploadedButUnverifiedError,
     BatchPartialFailureError,
     ClickUpCLIError,
     ConfirmationError,
@@ -71,6 +72,7 @@ from clickup_cli.task_mutations import (
 )
 from clickup_cli.time_tracking import (
     StopTimeResult,
+    TimeDeleteResult,
     TimeListResult,
     TimeMutationResult,
     TimeTrackingService,
@@ -276,6 +278,15 @@ def _attachment_download_json(result: AttachmentDownloadResult) -> JsonObject:
 
 def _time_mutation_json(result: TimeMutationResult) -> JsonObject:
     return {"changed": result.changed, "entry": result.entry}
+
+
+def _time_delete_json(result: TimeDeleteResult) -> JsonObject:
+    return {
+        "changed": result.changed,
+        "deleted": result.deleted,
+        "entry": result.entry,
+        "entry_id": result.entry_id,
+    }
 
 
 def _time_entry_text(entry: JsonObject) -> str:
@@ -1381,6 +1392,7 @@ def create_task(
                     raise CreatedButAttachmentFailedError(
                         "Task was created, but attachment processing could not begin safely",
                         details={
+                            "cause_type": exc.error_type,
                             "failed_path": str(requested_attachments[0]),
                             "task_id": task_id,
                             "uploaded_attachment_ids": [],
@@ -1398,14 +1410,20 @@ def create_task(
                 try:
                     upload = attachment_service.upload(task_id, path)
                 except ClickUpCLIError as exc:
+                    details: dict[str, JsonValue] = {
+                        "cause_type": exc.error_type,
+                        "failed_path": str(path),
+                        "task_id": task_id,
+                        "uploaded_attachment_ids": cast(list[JsonValue], uploaded_ids),
+                    }
+                    if isinstance(exc, AttachmentUploadedButUnverifiedError):
+                        failed_attachment_id = exc.details.get("attachment_id")
+                        if isinstance(failed_attachment_id, str):
+                            details["failed_attachment_id"] = failed_attachment_id
                     raise CreatedButAttachmentFailedError(
                         "Task was created, but a requested attachment failed; "
                         "inspect the task before retrying the attachment",
-                        details={
-                            "failed_path": str(path),
-                            "task_id": task_id,
-                            "uploaded_attachment_ids": cast(list[JsonValue], uploaded_ids),
-                        },
+                        details=details,
                     ) from exc
                 attachment_id = upload.attachment.get("id")
                 if not isinstance(attachment_id, str):
@@ -1731,21 +1749,27 @@ def delete_time(
     if not yes:
         _fail(state, ConfirmationError("Refusing to delete without --yes"))
 
-    def operation() -> str:
+    def operation() -> TimeDeleteResult:
         native_workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
         native_entry_id = validate_native_id(entry_id, label="ENTRY_ID")
 
-        def remove(client: ClickUpClient) -> str:
-            TimeTrackingService(client).delete(native_workspace_id, native_entry_id)
-            return native_entry_id
-
-        return _with_client(state, remove)
+        return _with_client(
+            state,
+            lambda client: TimeTrackingService(client).delete(
+                native_workspace_id,
+                native_entry_id,
+            ),
+        )
 
     _execute(
         state,
         operation,
-        json_result=lambda deleted_id: {"deleted": True, "entry_id": deleted_id},
-        text_result=lambda deleted_id: f"Deleted {deleted_id}",
+        json_result=_time_delete_json,
+        text_result=lambda result: (
+            f"Deleted {result.entry_id}"
+            if result.changed
+            else f"{result.entry_id}: already absent (no change)"
+        ),
     )
 
 

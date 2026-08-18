@@ -25,6 +25,8 @@ from clickup_cli.errors import (
 from clickup_cli.types import JsonObject, JsonValue
 
 _LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_TRUSTED_ATTACHMENT_HOSTS = {"attachments.clickup.com", "attachments-public.clickup.com"}
+_TRUSTED_ATTACHMENT_DOMAIN = "clickup-attachments.com"
 _MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 _MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
@@ -123,10 +125,16 @@ def validate_attachment_file(path: Path, *, name: str | None = None) -> tuple[Pa
     return path, upload_name
 
 
-def _validated_download_url(value: str) -> str:
+def _normalized_hostname(value: str) -> str:
+    try:
+        return value.encode("idna").decode("ascii").casefold()
+    except UnicodeError as exc:
+        raise AttachmentDownloadError("Attachment URL contains an invalid hostname") from exc
+
+
+def _validated_download_url(value: str, *, allow_localhost: bool) -> str:
     parsed = urlsplit(value)
-    hostname = (parsed.hostname or "").casefold()
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.hostname is None:
         raise AttachmentDownloadError("Attachment URL must be an absolute HTTPS URL")
     try:
         _port = parsed.port
@@ -136,11 +144,20 @@ def _validated_download_url(value: str) -> str:
         raise AttachmentDownloadError("Attachment URL cannot contain credentials")
     if parsed.fragment:
         raise AttachmentDownloadError("Attachment URL cannot contain a fragment")
-    if parsed.scheme != "https" and hostname not in _LOCAL_HOSTS:
+    hostname = _normalized_hostname(parsed.hostname)
+    if parsed.scheme == "http" and allow_localhost and hostname in _LOCAL_HOSTS:
+        return value
+    if parsed.scheme != "https":
         raise AttachmentDownloadError(
-            "Attachment downloads require HTTPS except for localhost test URLs"
+            "Attachment downloads require HTTPS on a trusted ClickUp attachment host"
         )
-    return value
+    if hostname in _TRUSTED_ATTACHMENT_HOSTS:
+        return value
+    if hostname == _TRUSTED_ATTACHMENT_DOMAIN or hostname.endswith(
+        f".{_TRUSTED_ATTACHMENT_DOMAIN}"
+    ):
+        return value
+    raise AttachmentDownloadError("Attachment URL host is not a trusted ClickUp attachment host")
 
 
 def _validate_output_path(output: Path, *, force: bool) -> None:
@@ -170,9 +187,15 @@ def _install_download(temp_path: Path, output: Path, *, force: bool) -> None:
     temp_path.unlink()
 
 
-def _download_without_authorization(url: str, output: Path, *, force: bool) -> int:
+def _download_without_authorization(
+    url: str,
+    output: Path,
+    *,
+    force: bool,
+    allow_localhost: bool,
+) -> int:
     _validate_output_path(output, force=force)
-    current_url = _validated_download_url(url)
+    current_url = _validated_download_url(url, allow_localhost=allow_localhost)
     temp_path: Path | None = None
     try:
         with httpx.Client(
@@ -195,7 +218,10 @@ def _download_without_authorization(url: str, output: Path, *, force: bool) -> i
                                 raise AttachmentDownloadError(
                                     "Attachment redirect did not include a Location header"
                                 )
-                            current_url = _validated_download_url(urljoin(current_url, location))
+                            current_url = _validated_download_url(
+                                urljoin(current_url, location),
+                                allow_localhost=allow_localhost,
+                            )
                             continue
                         if response.is_error:
                             raise AttachmentDownloadError(
@@ -355,7 +381,12 @@ class AttachmentService:
             raise AttachmentDownloadError(
                 f"Attachment {attachment_id} does not have a download URL"
             )
-        size = _download_without_authorization(url, output, force=force)
+        size = _download_without_authorization(
+            url,
+            output,
+            force=force,
+            allow_localhost=self._client.allows_local_attachment_downloads,
+        )
         return AttachmentDownloadResult(
             task_id=task_id,
             attachment_id=attachment_id,

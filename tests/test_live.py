@@ -73,6 +73,9 @@ def _invoke(
                     for attachment_id in raw_attachment_ids:
                         if isinstance(attachment_id, str):
                             owned_attachments[attachment_id] = task_id
+                failed_attachment_id = error.get("failed_attachment_id")
+                if isinstance(failed_attachment_id, str):
+                    owned_attachments[failed_attachment_id] = task_id
         entry_id = error.get("entry_id")
         if (
             error_type == "created_but_unverified"
@@ -438,8 +441,8 @@ def test_live_sandbox_cli_lifecycle(tmp_path: Path) -> None:
             entry_start = now - timedelta(hours=2)
             range_start = now - timedelta(days=1)
             range_end = now + timedelta(days=1)
-            manual_description = f"clickup-cli live manual time {run_marker}"
-            expected_entry = OwnedTimeEntry(attachment_task_id, run_marker)
+            manual_description = str(uuid.uuid4())
+            expected_entry = OwnedTimeEntry(attachment_task_id, manual_description)
             added_time = _invoke(
                 runner,
                 base_url,
@@ -463,7 +466,7 @@ def test_live_sandbox_cli_lifecycle(tmp_path: Path) -> None:
             assert added_time["entry"]["task_id"] == attachment_task_id
             assert added_time["entry"]["description"] == manual_description
 
-            updated_time_description = f"clickup-cli live manual time updated {run_marker}"
+            updated_time_description = f"{manual_description} updated"
             updated_time = _invoke(
                 runner,
                 base_url,

@@ -11,6 +11,7 @@ from clickup_cli.client import ClickUpClient
 from clickup_cli.errors import (
     APIError,
     ClickUpCLIError,
+    CreatedButUnidentifiedError,
     CreatedButUnverifiedError,
     InvalidDurationError,
     InvalidOperationError,
@@ -31,6 +32,7 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MAX_RANGE_MS = 366 * 86_400_000
 _MAX_DURATION_MS = 2_147_483_647  # OpenAPI declares signed int32 milliseconds.
 _MAX_TIMESTAMP_MS = (datetime.max.replace(tzinfo=UTC) - _EPOCH).days * 86_400_000 + 86_399_999
+_CREATE_SEARCH_PADDING_MS = 1_000
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,14 @@ class TimeMutationResult:
 class StopTimeResult:
     stopped: bool
     entry_id: str | None
+    entry: JsonObject | None
+
+
+@dataclass(frozen=True)
+class TimeDeleteResult:
+    changed: bool
+    deleted: bool
+    entry_id: str
     entry: JsonObject | None
 
 
@@ -305,14 +315,16 @@ def _current_data(payload: JsonObject) -> JsonObject | None:
     return cast(JsonObject, data)
 
 
-def _created_id(payload: JsonObject) -> str:
+def _created_id(payload: JsonObject) -> str | None:
     direct = payload.get("id")
-    if direct is not None:
-        return _required_string(direct, label="created time-entry ID")
+    if isinstance(direct, (str, int)) and not isinstance(direct, bool) and str(direct):
+        return str(direct)
     data = payload.get("data")
     if isinstance(data, dict):
-        return _required_string(data.get("id"), label="created time-entry ID")
-    raise APIError("ClickUp response is missing created time-entry ID")
+        nested = data.get("id")
+        if isinstance(nested, (str, int)) and not isinstance(nested, bool) and str(nested):
+            return str(nested)
+    return None
 
 
 def _ambiguous_api_error(error: APIError) -> bool:
@@ -320,27 +332,145 @@ def _ambiguous_api_error(error: APIError) -> bool:
     return status is None or status == 408 or status >= 500 or 200 <= status < 300
 
 
-def _update_tags(entry: JsonObject) -> list[JsonValue]:
+def _complete_update_tag(value: JsonValue) -> JsonObject | None:
+    if not isinstance(value, dict):
+        return None
+    name = value.get("name")
+    foreground = value.get("tag_fg")
+    background = value.get("tag_bg")
+    if not all(isinstance(item, str) and item for item in (name, foreground, background)):
+        return None
+    return {"name": str(name), "tag_bg": str(background), "tag_fg": str(foreground)}
+
+
+def _update_tag_names(entry: JsonObject) -> tuple[list[str], list[JsonValue]]:
     raw_tags = entry.get("tags")
     if not isinstance(raw_tags, list):
         raise InvalidOperationError(
             "Cannot update this entry because its required tags array was not returned"
         )
-    tags: list[JsonValue] = []
+    names: list[str] = []
     for raw_tag in raw_tags:
-        if not isinstance(raw_tag, dict):
+        if isinstance(raw_tag, str):
+            name = raw_tag
+        elif isinstance(raw_tag, dict) and isinstance(raw_tag.get("name"), str):
+            name = str(raw_tag["name"])
+        else:
             raise InvalidOperationError(
-                "Cannot safely preserve this entry's tags because ClickUp omitted tag colors"
+                "Cannot safely preserve this entry's tags because a tag name is invalid"
             )
-        name = raw_tag.get("name")
-        foreground = raw_tag.get("tag_fg")
-        background = raw_tag.get("tag_bg")
-        if not all(isinstance(value, str) and value for value in (name, foreground, background)):
+        if not name:
             raise InvalidOperationError(
-                "Cannot safely preserve this entry's tags because required tag fields are missing"
+                "Cannot safely preserve this entry's tags because a tag name is empty"
             )
-        tags.append({"name": str(name), "tag_bg": str(background), "tag_fg": str(foreground)})
+        names.append(name)
+    return names, cast(list[JsonValue], raw_tags)
+
+
+def _catalog_update_tags(
+    payload: JsonObject,
+    names: list[str],
+    *,
+    workspace_id: str,
+) -> list[JsonValue]:
+    raw_catalog = payload.get("data")
+    if not isinstance(raw_catalog, list):
+        raise InvalidOperationError(
+            "Cannot update this entry because the Workspace time-tag catalog is invalid",
+            details={"workspace_id": workspace_id},
+        )
+    catalog: list[JsonObject] = []
+    for raw_tag in raw_catalog:
+        complete = _complete_update_tag(raw_tag)
+        if complete is None:
+            raise InvalidOperationError(
+                "Cannot update this entry because the Workspace time-tag catalog contains "
+                "invalid metadata",
+                details={"workspace_id": workspace_id},
+            )
+        catalog.append(complete)
+
+    tags: list[JsonValue] = []
+    for name in names:
+        matches = [
+            tag
+            for tag in catalog
+            if isinstance(tag.get("name"), str) and str(tag["name"]).casefold() == name.casefold()
+        ]
+        if len(matches) != 1:
+            qualifier = "missing" if not matches else "ambiguous"
+            raise InvalidOperationError(
+                f"Cannot update this entry because time-tag metadata for {name!r} is {qualifier}",
+                details={"tag": name, "workspace_id": workspace_id},
+            )
+        tags.append(matches[0])
     return tags
+
+
+def _creation_response_fields(payload: JsonObject) -> JsonObject:
+    data = payload.get("data")
+    if isinstance(data, dict) and any(
+        field in data
+        for field in ("assignee", "billable", "description", "duration", "start", "tid")
+    ):
+        return cast(JsonObject, data)
+    return payload
+
+
+def _created_entry_matches(
+    entry: JsonObject,
+    response: JsonObject,
+    *,
+    start_ms: int,
+    duration_ms: int,
+    task_id: str | None,
+    description: str | None,
+    billable: bool | None,
+) -> bool:
+    if entry.get("start_ms") != start_ms or entry.get("duration_ms") != duration_ms:
+        return False
+
+    fields = _creation_response_fields(response)
+    response_task = fields.get("tid")
+    evidence_task = (
+        str(response_task)
+        if isinstance(response_task, (str, int))
+        and not isinstance(response_task, bool)
+        and str(response_task)
+        else None
+    )
+    expected_task = task_id if task_id is not None else evidence_task
+    if entry.get("task_id") != expected_task:
+        return False
+
+    response_description = fields.get("description")
+    expected_descriptions: set[str | None]
+    if description is not None:
+        expected_descriptions = {description}
+    elif isinstance(response_description, str):
+        expected_descriptions = {response_description}
+    else:
+        expected_descriptions = {None, ""}
+    if entry.get("description") not in expected_descriptions:
+        return False
+
+    response_billable = fields.get("billable")
+    expected_billable = billable
+    if expected_billable is None and isinstance(response_billable, bool):
+        expected_billable = response_billable
+    if expected_billable is not None and entry.get("billable") is not expected_billable:
+        return False
+
+    response_assignee = fields.get("assignee")
+    if (
+        isinstance(response_assignee, (str, int))
+        and not isinstance(response_assignee, bool)
+        and str(response_assignee)
+    ):
+        user = entry.get("user")
+        if not isinstance(user, dict) or user.get("id") != str(response_assignee):
+            return False
+    return True
 
 
 class TimeTrackingService:
@@ -348,6 +478,82 @@ class TimeTrackingService:
 
     def __init__(self, client: ClickUpClient) -> None:
         self._client = client
+
+    def _created_entry_id(
+        self,
+        workspace_id: str,
+        response: JsonObject,
+        *,
+        start: TimeBoundary,
+        duration: DurationInput,
+        task_id: str | None,
+        description: str | None,
+        billable: bool | None,
+    ) -> str:
+        direct_id = _created_id(response)
+        if direct_id is not None:
+            return direct_id
+
+        search_start = max(0, start.milliseconds - _CREATE_SEARCH_PADDING_MS)
+        search_end = min(
+            _MAX_TIMESTAMP_MS,
+            start.milliseconds + duration.milliseconds + _CREATE_SEARCH_PADDING_MS,
+        )
+        details: dict[str, JsonValue] = {
+            "candidate_ids": [],
+            "retry_safe": False,
+            "start_ms": start.milliseconds,
+            "workspace_id": workspace_id,
+        }
+        try:
+            result = self.list_entries(
+                workspace_id,
+                TimeRange(start_ms=search_start, end_ms=search_end),
+                task_id=task_id,
+            )
+            matches = [
+                entry
+                for entry in result.entries
+                if _created_entry_matches(
+                    entry,
+                    response,
+                    start_ms=start.milliseconds,
+                    duration_ms=duration.milliseconds,
+                    task_id=task_id,
+                    description=description,
+                    billable=billable,
+                )
+            ]
+        except ClickUpCLIError as exc:
+            raise CreatedButUnidentifiedError(
+                "ClickUp confirmed time-entry creation, but the native ID search failed. "
+                "DO NOT RETRY this creation because retrying can create a duplicate; inspect "
+                f"Workspace {workspace_id} around start {start.milliseconds}: {exc}",
+                details=details,
+            ) from exc
+
+        candidate_ids = [str(entry["id"]) for entry in matches]
+        details["candidate_ids"] = cast(list[JsonValue], candidate_ids)
+        details["match_count"] = len(candidate_ids)
+        if len(candidate_ids) != 1:
+            state = "could not be identified" if not candidate_ids else "is ambiguous"
+            raise CreatedButUnidentifiedError(
+                f"ClickUp confirmed time-entry creation, but the native ID {state}. "
+                "DO NOT RETRY this creation because retrying can create a duplicate; inspect "
+                f"Workspace {workspace_id} around start {start.milliseconds}",
+                details=details,
+            )
+        return candidate_ids[0]
+
+    def _update_tags(self, workspace_id: str, entry: JsonObject) -> list[JsonValue]:
+        names, raw_tags = _update_tag_names(entry)
+        if not raw_tags:
+            return []
+        complete = [_complete_update_tag(raw_tag) for raw_tag in raw_tags]
+        if all(tag is not None for tag in complete):
+            return cast(list[JsonValue], complete)
+        catalog = self._client.get_time_entry_tags(workspace_id)
+        return _catalog_update_tags(catalog, names, workspace_id=workspace_id)
 
     def current(self, workspace_id: str, *, assignee: int | None = None) -> JsonObject | None:
         raw = _current_data(self._client.get_current_time_entry(workspace_id, assignee=assignee))
@@ -527,7 +733,15 @@ class TimeTrackingService:
                 description=description,
                 billable=billable,
             )
-            entry_id = _created_id(response)
+            entry_id = self._created_entry_id(
+                workspace_id,
+                response,
+                start=start,
+                duration=duration,
+                task_id=task_id,
+                description=description,
+                billable=billable,
+            )
         except TransportError as exc:
             raise OutcomeUnknownError(
                 "Time-entry creation outcome is unknown because ClickUp did not return an ID; "
@@ -607,7 +821,7 @@ class TimeTrackingService:
         if current.get("running") and (changes["start"] or changes["duration"]):
             raise InvalidOperationError("Cannot safely change timing fields on a running entry")
 
-        body: JsonObject = {"tags": _update_tags(raw)}
+        body: JsonObject = {"tags": self._update_tags(workspace_id, raw)}
         if changes["description"]:
             body["description"] = description
         if changes["task"]:
@@ -687,5 +901,96 @@ class TimeTrackingService:
             raise VerificationError("Updated time-entry billable verification failed")
         return TimeMutationResult(changed=True, entry=updated)
 
-    def delete(self, workspace_id: str, entry_id: str) -> None:
-        self._client.delete_time_entry(workspace_id, entry_id)
+    def delete(self, workspace_id: str, entry_id: str) -> TimeDeleteResult:
+        try:
+            current_payload = self._client.get_time_entry(workspace_id, entry_id)
+        except APIError as exc:
+            if exc.status_code == 404:
+                return TimeDeleteResult(
+                    changed=False,
+                    deleted=False,
+                    entry_id=entry_id,
+                    entry=None,
+                )
+            raise
+        current = normalize_time_entry(
+            _data_object(current_payload, label="time-entry delete pre-read data")
+        )
+        if current.get("id") != entry_id:
+            raise APIError(
+                f"Time-entry delete pre-read expected ID {entry_id}, received {current.get('id')}",
+                details={"entry_id": entry_id},
+            )
+
+        try:
+            response = self._client.delete_time_entry(workspace_id, entry_id)
+        except TransportError as exc:
+            raise OutcomeUnknownError(
+                "Time-entry deletion outcome is unknown because the response was lost; inspect "
+                "the exact entry before retrying",
+                details={"entry_id": entry_id},
+            ) from exc
+        except APIError as exc:
+            exc.details.setdefault("entry_id", entry_id)
+            if _ambiguous_api_error(exc):
+                raise OutcomeUnknownError(
+                    "Time-entry deletion outcome is unknown because ClickUp did not return a "
+                    "usable response; inspect the exact entry before retrying",
+                    details={"entry_id": entry_id},
+                ) from exc
+            raise
+
+        try:
+            deleted_id = _required_string(
+                _data_object(response, label="deleted time-entry data").get("id"),
+                label="deleted time-entry ID",
+            )
+        except ClickUpCLIError as exc:
+            raise OutcomeUnknownError(
+                "Time-entry deletion outcome is unknown because the successful response did not "
+                "identify the deleted entry; inspect the exact entry before retrying",
+                details={"entry_id": entry_id},
+            ) from exc
+        if deleted_id != entry_id:
+            raise OutcomeUnknownError(
+                f"Time-entry deletion outcome is unknown because ClickUp returned ID {deleted_id} "
+                f"instead of {entry_id}; inspect both IDs before retrying",
+                details={"entry_id": entry_id, "response_entry_id": deleted_id},
+            )
+
+        try:
+            present_payload = self._client.get_time_entry(workspace_id, entry_id)
+        except APIError as exc:
+            if exc.status_code == 404:
+                return TimeDeleteResult(
+                    changed=True,
+                    deleted=True,
+                    entry_id=entry_id,
+                    entry=current,
+                )
+            raise OutcomeUnknownError(
+                "Time-entry deletion returned the expected ID, but the absence check failed; "
+                "inspect the exact entry before retrying",
+                details={"entry_id": entry_id},
+            ) from exc
+        except TransportError as exc:
+            raise OutcomeUnknownError(
+                "Time-entry deletion returned the expected ID, but the absence check was lost; "
+                "inspect the exact entry before retrying",
+                details={"entry_id": entry_id},
+            ) from exc
+
+        try:
+            present = normalize_time_entry(
+                _data_object(present_payload, label="time-entry delete absence-check data")
+            )
+        except ClickUpCLIError as exc:
+            raise OutcomeUnknownError(
+                "Time-entry deletion returned the expected ID, but the absence check was invalid; "
+                "inspect the exact entry before retrying",
+                details={"entry_id": entry_id},
+            ) from exc
+        raise VerificationError(
+            f"Time-entry deletion verification failed: entry {present.get('id')} is still present",
+            details={"entry_id": entry_id},
+        )

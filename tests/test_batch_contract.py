@@ -24,6 +24,7 @@ from tests.conftest import MockClickUpAPI
 
 AUTH_VALUE = "batch-auth-value"
 LIST_ID = "list_456"
+SPACE_ID = "789"
 READ_HEADERS = {"Accept": "application/json", "Authorization": AUTH_VALUE}
 WRITE_HEADERS = {**READ_HEADERS, "Content-Type": "application/json"}
 
@@ -35,6 +36,7 @@ def task_payload(
     *,
     name: str,
     status: str = "Open",
+    description: str = "Description",
     tags: list[str] | None = None,
     assignees: list[int] | None = None,
 ) -> dict[str, Any]:
@@ -42,7 +44,7 @@ def task_payload(
         "archived": False,
         "assignees": [{"id": user_id} for user_id in (assignees or [])],
         "attachments": [],
-        "description": "Description",
+        "description": description,
         "due_date": None,
         "due_date_time": None,
         "id": task_id,
@@ -93,10 +95,22 @@ def expect_list(api: MockClickUpAPI) -> None:
         headers=READ_HEADERS,
         response_json={
             "id": LIST_ID,
+            "space": {"id": SPACE_ID},
             "statuses": [
                 {"status": "Open", "type": "open"},
                 {"status": "In Progress", "type": "custom"},
             ],
+        },
+    )
+
+
+def expect_space_tags(api: MockClickUpAPI, names: list[str]) -> None:
+    api.expect(
+        "GET",
+        f"/api/v2/space/{SPACE_ID}/tag",
+        headers=WRITE_HEADERS,
+        response_json={
+            "tags": [{"name": name, "tag_bg": "#000000", "tag_fg": "#ffffff"} for name in names]
         },
     )
 
@@ -275,6 +289,7 @@ def test_plan_is_read_only_caches_statuses_and_reports_deterministic_diffs(
         task_payload("task_2", name="Second", status="In Progress"),
     )
     expect_list(mock_api)
+    expect_space_tags(mock_api, ["Focus"])
 
     result = invoke(mock_api, ["task", "batch", "plan", str(path)])
 
@@ -304,7 +319,12 @@ def test_plan_is_read_only_caches_statuses_and_reports_deterministic_diffs(
         "operation": "set_status",
     }
     assert payload["tasks"][1]["changes"][0]["changed"] is False
-    assert [request.method for request in mock_api.state.requests] == ["GET", "GET", "GET"]
+    assert [request.method for request in mock_api.state.requests] == [
+        "GET",
+        "GET",
+        "GET",
+        "GET",
+    ]
 
     text = batch_plan_text(payload)
     assert text.startswith(f"Manifest SHA-256: {hashlib.sha256(raw).hexdigest()}\n")
@@ -334,6 +354,185 @@ def test_invalid_status_finishes_task_reads_and_never_writes(
     assert error["type"] == "invalid_status"
     assert error["line"] == 1
     assert [request.method for request in mock_api.state.requests] == ["GET", "GET", "GET"]
+
+
+def test_invalid_later_tag_fails_total_preflight_with_zero_mutation(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "manifest.jsonl"
+    write_manifest(
+        path,
+        [
+            {"task": "task_1", "add_tags": ["focus"]},
+            {"task": "task_2", "add_tags": ["missing"]},
+        ],
+    )
+    expect_task(mock_api, "task_1", task_payload("task_1", name="First"))
+    expect_task(mock_api, "task_2", task_payload("task_2", name="Second"))
+    expect_list(mock_api)
+    expect_space_tags(mock_api, ["Focus"])
+
+    result = invoke(mock_api, ["task", "batch", "apply", str(path), "--yes"])
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "invalid_operation"
+    assert error["line"] == 2
+    assert error["task_id"] == "task_2"
+    assert error["list_id"] == LIST_ID
+    assert error["space_id"] == SPACE_ID
+    assert error["tag"] == "missing"
+    assert all(request.method == "GET" for request in mock_api.state.requests)
+    assert len([request for request in mock_api.state.requests if "/tag" in request.path]) == 1
+
+
+def test_tag_preflight_reuses_list_and_space_catalog_and_canonicalizes_names(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "manifest.jsonl"
+    write_manifest(
+        path,
+        [
+            {"task": "task_1", "add_tags": ["fOcUs"]},
+            {"task": "task_2", "add_tags": ["FOCUS"]},
+        ],
+    )
+    expect_task(mock_api, "task_1", task_payload("task_1", name="First"))
+    expect_task(mock_api, "task_2", task_payload("task_2", name="Second"))
+    expect_list(mock_api)
+    expect_space_tags(mock_api, ["Focus"])
+
+    result = invoke(mock_api, ["task", "batch", "plan", str(path)])
+
+    assert result.exit_code == 0, result.output
+    tasks = json.loads(result.stdout)["result"]["tasks"]
+    assert [task["changes"][0]["value"] for task in tasks] == ["Focus", "Focus"]
+    assert [task["changes"][0]["after"] for task in tasks] == [["Focus"], ["Focus"]]
+    assert [request.path for request in mock_api.state.requests].count(
+        f"/api/v2/list/{LIST_ID}"
+    ) == 1
+    assert [request.path for request in mock_api.state.requests].count(
+        f"/api/v2/space/{SPACE_ID}/tag"
+    ) == 1
+
+
+def test_existing_tag_add_noop_needs_no_list_or_space_catalog(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "manifest.jsonl"
+    write_manifest(path, [{"task": "task_1", "add_tags": ["FOCUS"]}])
+    expect_task(
+        mock_api,
+        "task_1",
+        task_payload("task_1", name="First", tags=["Focus"]),
+    )
+
+    result = invoke(mock_api, ["task", "batch", "plan", str(path)])
+
+    assert result.exit_code == 0, result.output
+    change = json.loads(result.stdout)["result"]["tasks"][0]["changes"][0]
+    assert change["changed"] is False
+    assert change["value"] == "Focus"
+    assert len(mock_api.state.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        {"tags": []},
+        {
+            "tags": [
+                {"name": "Focus", "tag_bg": "#000000", "tag_fg": "#ffffff"},
+                {"name": "focus", "tag_bg": "#111111", "tag_fg": "#eeeeee"},
+            ]
+        },
+        {"tags": [{"name": "Focus", "tag_bg": "#000000"}]},
+        {"tags": "invalid"},
+    ],
+)
+def test_missing_ambiguous_or_invalid_space_catalog_fails_before_write(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+    catalog: dict[str, Any],
+) -> None:
+    path = tmp_path / "manifest.jsonl"
+    write_manifest(path, [{"task": "task_1", "add_tags": ["focus"]}])
+    expect_task(mock_api, "task_1", task_payload("task_1", name="First"))
+    expect_list(mock_api)
+    mock_api.expect(
+        "GET",
+        f"/api/v2/space/{SPACE_ID}/tag",
+        headers=WRITE_HEADERS,
+        response_json=catalog,
+    )
+
+    result = invoke(mock_api, ["task", "batch", "apply", str(path), "--yes"])
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "invalid_operation"
+    assert error["line"] == 1
+    assert error["task_id"] == "task_1"
+    assert error["list_id"] == LIST_ID
+    assert error["space_id"] == SPACE_ID
+    assert all(request.method == "GET" for request in mock_api.state.requests)
+
+
+def test_batch_apply_uses_canonical_space_catalog_tag_on_wire(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "manifest.jsonl"
+    write_manifest(path, [{"task": "task_1", "add_tags": ["fOcUs"]}])
+    before = task_payload("task_1", name="First")
+    after = task_payload("task_1", name="First", tags=["Focus"])
+    expect_task(mock_api, "task_1", before)
+    expect_list(mock_api)
+    expect_space_tags(mock_api, ["Focus"])
+    expect_task(mock_api, "task_1", before)
+    mock_api.expect(
+        "POST",
+        "/api/v2/task/task_1/tag/Focus",
+        headers=WRITE_HEADERS,
+        response_json={},
+    )
+    expect_task(mock_api, "task_1", after)
+
+    result = invoke(mock_api, ["task", "batch", "apply", str(path), "--yes"])
+
+    assert result.exit_code == 0, result.output
+    operation = json.loads(result.stdout)["result"]["tasks"][0]["operations"][0]
+    assert operation["value"] == "Focus"
+
+
+def test_batch_empty_description_apply_uses_wire_space_and_logical_empty_output(
+    mock_api: MockClickUpAPI,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "manifest.jsonl"
+    write_manifest(path, [{"task": "task_1", "set": {"description": ""}}])
+    before = task_payload("task_1", name="First", description="Before")
+    after = task_payload("task_1", name="First", description=" ")
+    expect_task(mock_api, "task_1", before)
+    expect_task(mock_api, "task_1", before)
+    mock_api.expect(
+        "PUT",
+        "/api/v2/task/task_1",
+        headers=WRITE_HEADERS,
+        json_body={"description": " "},
+        response_json={},
+    )
+    expect_task(mock_api, "task_1", after)
+
+    result = invoke(mock_api, ["task", "batch", "apply", str(path), "--yes"])
+
+    assert result.exit_code == 0, result.output
+    task = json.loads(result.stdout)["result"]["tasks"][0]
+    assert task["final_task"]["description"] == ""
+    assert task["operations"][0]["changed"] is True
 
 
 def test_apply_requires_confirmation_before_manifest_or_network(
@@ -536,11 +735,17 @@ class _InMemoryBatchClient:
         self.calls.append("get_list")
         return {
             "id": LIST_ID,
+            "space": {"id": SPACE_ID},
             "statuses": [
                 {"status": "Open", "type": "open"},
                 {"status": "In Progress", "type": "custom"},
             ],
         }
+
+    def get_space_tags(self, space_id: str) -> dict[str, object]:
+        assert space_id == SPACE_ID
+        self.calls.append("get_space_tags")
+        return {"tags": [{"name": "Focus", "tag_bg": "#000000", "tag_fg": "#ffffff"}]}
 
     def update_task_status(self, task_id: str, canonical_status: str) -> None:
         assert task_id == self.task["id"]
@@ -659,7 +864,7 @@ def test_apply_dispatches_every_supported_operation_with_a_readback_and_no_forbi
     assert final_task["due_date"] == "2026-08-20"
     assert final_task["priority"] == "high"
     assert final_task["start_date"] == "2026-08-19T10:30:00Z"
-    assert final_task["tags"] == ["focus"]
+    assert final_task["tags"] == ["Focus"]
     assert [assignee["id"] for assignee in final_task["assignees"]] == ["123"]
     assert final_task["archived"] is True
     write_calls = [call for call in client.calls if call.startswith("update_")]

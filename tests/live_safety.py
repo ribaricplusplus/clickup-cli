@@ -201,7 +201,7 @@ def delete_owned_time_entry(
     sandbox_list_id: str,
     delete: Callable[[str], object] | None = None,
 ) -> None:
-    """Fetch, prove, and delete exactly one captured manual entry."""
+    """Fetch, prove, delete, and independently require 404 for one manual entry."""
 
     require_owned_time_entry(
         client,
@@ -212,3 +212,10 @@ def delete_owned_time_entry(
         sandbox_list_id=sandbox_list_id,
     )
     (delete or (lambda target: client.delete_time_entry(workspace_id, target)))(entry_id)
+    try:
+        client.get_time_entry(workspace_id, entry_id)
+    except APIError as exc:
+        if exc.status_code == 404:
+            return
+        raise
+    raise LiveContainmentError(f"Time-entry cleanup did not produce HTTP 404 for {entry_id}")

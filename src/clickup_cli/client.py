@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
@@ -54,6 +54,13 @@ class ClickUpClient:
         """Close the underlying connection pool."""
 
         self._http.close()
+
+    @property
+    def allows_local_attachment_downloads(self) -> bool:
+        """Return whether attachment socket contracts may use plaintext localhost."""
+
+        hostname = (urlsplit(self._base_url).hostname or "").casefold()
+        return hostname in {"127.0.0.1", "::1", "localhost"}
 
     def _url(self, path: str) -> str:
         return f"{self._base_url}/v2{path}"
@@ -214,6 +221,14 @@ class ClickUpClient:
         list_id = validate_native_id(list_id, label="LIST_ID")
         return self._object_response("GET", f"/list/{list_id}")
 
+    def get_space_tags(self, space_id: str) -> JsonObject:
+        space_id = validate_numeric_id(space_id, label="SPACE_ID")
+        return self._object_response(
+            "GET",
+            f"/space/{space_id}/tag",
+            json_content_type=True,
+        )
+
     def get_list_tasks(
         self,
         list_id: str,
@@ -291,7 +306,10 @@ class ClickUpClient:
                 )
         if "archived" in fields and not isinstance(fields["archived"], bool):
             raise InvalidOperationError("Task archived state must be boolean")
-        response = self._request("PUT", f"/task/{task_id}", json_body=fields)
+        wire_fields = dict(fields)
+        if wire_fields.get("description") == "":
+            wire_fields["description"] = " "
+        response = self._request("PUT", f"/task/{task_id}", json_body=wire_fields)
         response.close()
 
     def update_task_tag(self, task_id: str, tag_name: str, *, add: bool) -> None:
@@ -539,6 +557,14 @@ class ClickUpClient:
             path = f"{path}?{urlencode({'assignee': self._positive_user_id(assignee)})}"
         return self._object_response("GET", path, json_content_type=True)
 
+    def get_time_entry_tags(self, workspace_id: str) -> JsonObject:
+        workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
+        return self._object_response(
+            "GET",
+            f"/team/{workspace_id}/time_entries/tags",
+            json_content_type=True,
+        )
+
     def start_time_entry(
         self,
         workspace_id: str,
@@ -623,12 +649,11 @@ class ClickUpClient:
         )
         response.close()
 
-    def delete_time_entry(self, workspace_id: str, entry_id: str) -> None:
+    def delete_time_entry(self, workspace_id: str, entry_id: str) -> JsonObject:
         workspace_id = validate_numeric_id(workspace_id, label="WORKSPACE_ID")
         entry_id = validate_native_id(entry_id, label="ENTRY_ID")
-        response = self._request(
+        return self._object_response(
             "DELETE",
             f"/team/{workspace_id}/time_entries/{entry_id}",
             json_content_type=True,
         )
-        response.close()
