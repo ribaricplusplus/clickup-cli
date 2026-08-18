@@ -45,8 +45,10 @@ Unknown outcomes from non-idempotent operations are never presented as safe fail
 When an ID is known, partial errors preserve it for inspection, including a distinct attachment ID
 whose upload returned successfully but whose readback failed. A successful no-ID time-entry create
 performs its own narrow exact-match search; zero/multiple matches are explicitly confirmed-created
-and unsafe to retry. Delete response loss, invalid response IDs, and failed absence checks preserve
-the affected entry ID as an unknown outcome.
+and unsafe to retry. Time-entry deletion validates a returned ID when present; production may omit
+it, but success is then reported only after an independent 404 or HTTP 200 null/empty absence
+proof. Response loss, wrong response IDs, and failed absence checks preserve the affected entry ID
+as an unknown outcome.
 
 ## Live-test containment
 
@@ -60,7 +62,8 @@ Every temporary resource carries a per-run UUID. Cleanup allow-lists contain onl
 Task cleanup fetches the exact task and re-proves the sandbox List plus markers in both name and
 description before deletion, then requires HTTP 404. Manual time-entry cleanup fetches only the ID
 captured during that run and requires its marker and attachment to a run-owned sandbox task. After
-either deletion path it independently requires exact-entry HTTP 404 before allow-list removal.
+that deletion it independently requires exact-entry HTTP 404 or observed HTTP 200 null/empty data
+before allow-list removal.
 Failed proof or absence means refusal and a surviving-ID report, never deletion. Time `start` and
 `stop` are excluded from live coverage to avoid racing a human timer.
 

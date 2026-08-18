@@ -72,7 +72,8 @@ start/stop orchestration. Non-idempotent operations distinguish an unknown outco
 Official no-ID manual creates use a narrow exact-match range lookup before singular verification.
 Updates preserve ClickUp's required tag array, resolving string tags through the Workspace catalog,
 reject unsafe running-entry timing changes, send the smallest valid body, and verify a single-entry
-readback. Deletion pre-reads, validates the official response ID, and proves final absence.
+readback. Deletion pre-reads, validates a response ID when present, and proves final absence even
+when production omits that ID and represents absence as HTTP 200 null data.
 
 ### Batch composition and CLI output
 
@@ -95,7 +96,8 @@ Every endpoint method constructs a new request body from supported supplied fiel
 focused services read only the state needed to validate, canonicalize, or minimize a mutation.
 Successful non-delete writes are not reported until a separate API read confirms the
 operation-specific invariant. Task deletion reports its successful HTTP response. Time-entry
-deletion additionally validates the official response ID and requires a separate exact-entry 404.
+deletion validates any returned response ID and requires a separate exact-entry 404 or observed
+HTTP 200 null/empty absence before a missing response ID can be accepted.
 
 Create and time operations can cross a non-idempotent boundary before a response is usable. The
 error model therefore separates:
@@ -124,8 +126,8 @@ the first write it proves the exact configured List ID/name/Space and the Worksp
 tree. A UUID is carried in all temporary content. Run-created task and manual time-entry IDs are
 stored in ownership maps. Cleanup always fetches first, refuses an unowned or unmarked resource,
 and requires post-delete task HTTP 404. Manual time-entry cleanup also proves its task is a
-run-owned task still in the sandbox and independently requires its own HTTP 404 before allow-list
-removal. The test never starts or stops a timer.
+run-owned task still in the sandbox and independently requires its own HTTP 404 or observed HTTP
+200 null/empty singular absence before allow-list removal. The test never starts or stops a timer.
 
 Containment helpers live under `tests/` rather than the production package and have their own
 localhost contracts proving that a failed marker, List, task, or entry check issues no delete.

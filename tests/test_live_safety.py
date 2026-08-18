@@ -328,6 +328,70 @@ def test_owned_time_entry_cleanup_proves_entry_and_task_before_exact_delete(
         )
 
 
+def test_owned_time_entry_cleanup_accepts_observed_200_null_absence(
+    mock_api: MockClickUpAPI,
+) -> None:
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": time_entry_payload()},
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/task/{TASK_ID}",
+        headers=READ_HEADERS,
+        response_json=task_payload(),
+    )
+    mock_api.expect(
+        "DELETE",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={},
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": None},
+    )
+
+    with ClickUpClient(token=AUTH_VALUE, base_url=mock_api.base_url) as client:
+        delete_owned_time_entry(
+            client,
+            WORKSPACE_ID,
+            ENTRY_ID,
+            {ENTRY_ID: OwnedTimeEntry(TASK_ID, MARKER)},
+            {TASK_ID: OwnedTask(MARKER)},
+            sandbox_list_id=LIST_ID,
+        )
+
+
+def test_owned_time_entry_cleanup_accepts_already_absent_null_without_delete(
+    mock_api: MockClickUpAPI,
+) -> None:
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": None},
+    )
+    deleted: list[str] = []
+
+    with ClickUpClient(token=AUTH_VALUE, base_url=mock_api.base_url) as client:
+        delete_owned_time_entry(
+            client,
+            WORKSPACE_ID,
+            ENTRY_ID,
+            {ENTRY_ID: OwnedTimeEntry(TASK_ID, MARKER)},
+            {TASK_ID: OwnedTask(MARKER)},
+            sandbox_list_id=LIST_ID,
+            delete=lambda target: deleted.append(target),
+        )
+
+    assert deleted == []
+
+
 def test_owned_time_entry_cleanup_independently_checks_404_after_cli_callback(
     mock_api: MockClickUpAPI,
 ) -> None:
@@ -390,7 +454,7 @@ def test_owned_time_entry_cleanup_refuses_to_finish_when_entry_remains(
     )
 
     with ClickUpClient(token=AUTH_VALUE, base_url=mock_api.base_url) as client:
-        with pytest.raises(LiveContainmentError, match="did not produce HTTP 404"):
+        with pytest.raises(LiveContainmentError, match="did not prove absence"):
             delete_owned_time_entry(
                 client,
                 WORKSPACE_ID,

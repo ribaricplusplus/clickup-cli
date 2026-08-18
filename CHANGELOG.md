@@ -33,10 +33,11 @@ Changelog, and the project intends to use Semantic Versioning.
 - Expanded the opt-in live lifecycle to prove the exact dedicated sandbox Workspace, Space, and
   List before writing, mark all run resources with a UUID, allow-list created IDs, and verify
   ownership immediately before task or manual time-entry cleanup, including an independent final
-  time-entry HTTP 404 before removing an allow-list ID.
+  time-entry 404 or observed HTTP 200 null/empty absence before removing an allow-list ID.
 - Manual time creation now supports the official successful response without an ID by uniquely
   matching a narrow date-range read; tagged updates use Workspace catalog metadata; deletion is
-  idempotent, validates the official response ID, and verifies absence.
+  idempotent, validates a response ID when present, and verifies absence through either documented
+  404 or ClickUp's observed HTTP 200 null/empty singular response.
 - Empty task-description updates now send ClickUp's required single-space clear value while
   retaining logical empty strings in CLI, batch, verification, and output contracts.
 - Attachment-aware task creation retains a distinct known-but-unverified failed attachment ID in

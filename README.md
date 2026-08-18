@@ -359,9 +359,11 @@ start, candidate IDs, and `retry_safe:false`; do not retry because the POST alre
 
 Update reads first, preserves the API-required tag array, and maps string-only singular-read tags
 through the Workspace time-tag catalog before writing. Empty tags need no catalog and complete tag
-objects remain accepted. Delete pre-reads the exact ID, treats an initial 404 as an idempotent
-no-op, validates the official deleted `data.id`, and independently requires a final 404. Ambiguous
-delete responses or absence checks return `outcome_unknown` with `entry_id`. Timing changes on a
+objects remain accepted. Delete pre-reads the exact ID, treats an initial 404 or observed
+`200 {"data": null}` as an idempotent no-op, validates the deleted `data.id` when ClickUp returns
+one, and independently requires either 404 or the null/empty singular absence shape. A missing
+delete-response ID is accepted only after that absence proof. Wrong IDs, lost responses, or failed
+absence checks return `outcome_unknown` with `entry_id`. Timing changes on a
 running entry fail closed. Unknown create/start/update/stop outcomes preserve every known entry ID
 so automation can inspect rather than retry blindly.
 
@@ -449,8 +451,9 @@ description contains one UUID marker. Only IDs returned by the current run enter
 allow-lists. Before every task deletion, the test fetches the exact task and re-proves its sandbox
 List plus both task markers; after deletion it requires HTTP 404. A manual time entry is fetched and
 marker/task-verified against a run-owned sandbox task before its captured ID can be deleted;
-cleanup independently requires HTTP 404 after either the CLI delete callback or direct-client
-fallback before removing the ID from its allow-list. If proof or absence fails, cleanup reports the
+cleanup independently requires either HTTP 404 or ClickUp's observed HTTP 200 null/empty singular
+absence after either the CLI delete callback or direct-client fallback before removing the ID from
+its allow-list. If proof or absence fails, cleanup reports the
 surviving ID. A `finally` block handles structured partial-create IDs and removes manual entries
 before tasks.
 

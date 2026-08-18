@@ -306,6 +306,12 @@ def _data_object(payload: JsonObject, *, label: str) -> JsonObject:
     return cast(JsonObject, data)
 
 
+def _singular_entry_is_absent(payload: JsonObject) -> bool:
+    """Recognize ClickUp's observed HTTP 200 null/empty singular absence shape."""
+
+    return "data" in payload and payload.get("data") in (None, {})
+
+
 def _current_data(payload: JsonObject) -> JsonObject | None:
     data = payload.get("data")
     if data is None or data == {}:
@@ -913,6 +919,13 @@ class TimeTrackingService:
                     entry=None,
                 )
             raise
+        if _singular_entry_is_absent(current_payload):
+            return TimeDeleteResult(
+                changed=False,
+                deleted=False,
+                entry_id=entry_id,
+                entry=None,
+            )
         current = normalize_time_entry(
             _data_object(current_payload, label="time-entry delete pre-read data")
         )
@@ -940,23 +953,25 @@ class TimeTrackingService:
                 ) from exc
             raise
 
-        try:
-            deleted_id = _required_string(
-                _data_object(response, label="deleted time-entry data").get("id"),
-                label="deleted time-entry ID",
-            )
-        except ClickUpCLIError as exc:
-            raise OutcomeUnknownError(
-                "Time-entry deletion outcome is unknown because the successful response did not "
-                "identify the deleted entry; inspect the exact entry before retrying",
-                details={"entry_id": entry_id},
-            ) from exc
-        if deleted_id != entry_id:
-            raise OutcomeUnknownError(
-                f"Time-entry deletion outcome is unknown because ClickUp returned ID {deleted_id} "
-                f"instead of {entry_id}; inspect both IDs before retrying",
-                details={"entry_id": entry_id, "response_entry_id": deleted_id},
-            )
+        deleted_data = response.get("data")
+        if isinstance(deleted_data, dict) and "id" in deleted_data:
+            try:
+                deleted_id = _required_string(
+                    deleted_data.get("id"),
+                    label="deleted time-entry ID",
+                )
+            except ClickUpCLIError as exc:
+                raise OutcomeUnknownError(
+                    "Time-entry deletion outcome is unknown because ClickUp returned an invalid "
+                    "deleted-entry ID; inspect the exact entry before retrying",
+                    details={"entry_id": entry_id},
+                ) from exc
+            if deleted_id != entry_id:
+                raise OutcomeUnknownError(
+                    f"Time-entry deletion outcome is unknown because ClickUp returned ID "
+                    f"{deleted_id} instead of {entry_id}; inspect both IDs before retrying",
+                    details={"entry_id": entry_id, "response_entry_id": deleted_id},
+                )
 
         try:
             present_payload = self._client.get_time_entry(workspace_id, entry_id)
@@ -969,16 +984,24 @@ class TimeTrackingService:
                     entry=current,
                 )
             raise OutcomeUnknownError(
-                "Time-entry deletion returned the expected ID, but the absence check failed; "
+                "Time-entry deletion returned successfully, but the absence check failed; "
                 "inspect the exact entry before retrying",
                 details={"entry_id": entry_id},
             ) from exc
         except TransportError as exc:
             raise OutcomeUnknownError(
-                "Time-entry deletion returned the expected ID, but the absence check was lost; "
+                "Time-entry deletion returned successfully, but the absence check was lost; "
                 "inspect the exact entry before retrying",
                 details={"entry_id": entry_id},
             ) from exc
+
+        if _singular_entry_is_absent(present_payload):
+            return TimeDeleteResult(
+                changed=True,
+                deleted=True,
+                entry_id=entry_id,
+                entry=current,
+            )
 
         try:
             present = normalize_time_entry(
@@ -986,7 +1009,7 @@ class TimeTrackingService:
             )
         except ClickUpCLIError as exc:
             raise OutcomeUnknownError(
-                "Time-entry deletion returned the expected ID, but the absence check was invalid; "
+                "Time-entry deletion returned successfully, but the absence check was invalid; "
                 "inspect the exact entry before retrying",
                 details={"entry_id": entry_id},
             ) from exc

@@ -163,13 +163,15 @@ def require_owned_time_entry(
     task_ownership: Mapping[str, OwnedTask],
     *,
     sandbox_list_id: str,
+    entry_payload: JsonObject | None = None,
 ) -> None:
     """Prove a captured manual entry and its attached task belong to this run."""
 
     owner = ownership.get(entry_id)
     if owner is None:
         raise LiveContainmentError(f"Refusing time-entry cleanup for unowned ID {entry_id}")
-    entry = normalize_time_entry(_time_entry_data(client.get_time_entry(workspace_id, entry_id)))
+    payload = entry_payload or client.get_time_entry(workspace_id, entry_id)
+    entry = normalize_time_entry(_time_entry_data(payload))
     if entry.get("id") != entry_id:
         raise LiveContainmentError(
             f"Refusing time-entry cleanup: readback ID mismatch for {entry_id}"
@@ -201,8 +203,18 @@ def delete_owned_time_entry(
     sandbox_list_id: str,
     delete: Callable[[str], object] | None = None,
 ) -> None:
-    """Fetch, prove, delete, and independently require 404 for one manual entry."""
+    """Fetch, prove, delete, and independently require confirmed absence."""
 
+    if entry_id not in ownership:
+        raise LiveContainmentError(f"Refusing time-entry cleanup for unowned ID {entry_id}")
+    try:
+        entry_payload = client.get_time_entry(workspace_id, entry_id)
+    except APIError as exc:
+        if exc.status_code == 404:
+            return
+        raise
+    if "data" in entry_payload and entry_payload.get("data") in (None, {}):
+        return
     require_owned_time_entry(
         client,
         workspace_id,
@@ -210,12 +222,15 @@ def delete_owned_time_entry(
         ownership,
         task_ownership,
         sandbox_list_id=sandbox_list_id,
+        entry_payload=entry_payload,
     )
     (delete or (lambda target: client.delete_time_entry(workspace_id, target)))(entry_id)
     try:
-        client.get_time_entry(workspace_id, entry_id)
+        readback = client.get_time_entry(workspace_id, entry_id)
     except APIError as exc:
         if exc.status_code == 404:
             return
         raise
-    raise LiveContainmentError(f"Time-entry cleanup did not produce HTTP 404 for {entry_id}")
+    if "data" in readback and readback.get("data") in (None, {}):
+        return
+    raise LiveContainmentError(f"Time-entry cleanup did not prove absence for {entry_id}")

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -94,6 +96,52 @@ def _iso_utc(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _require_live_rate_budget(
+    token: str,
+    base_url: str,
+    *,
+    minimum_remaining: int,
+) -> None:
+    """Wait for ClickUp's documented minute window only when response headers require it."""
+
+    endpoint = f"{base_url.rstrip('/')}/v2/user"
+    headers = {"Accept": "application/json", "Authorization": token}
+    for attempt in range(2):
+        with httpx.Client(
+            headers=headers,
+            timeout=httpx.Timeout(30.0, connect=5.0),
+            trust_env=False,
+        ) as guard:
+            response = guard.get(endpoint)
+        raw_remaining = response.headers.get("X-RateLimit-Remaining")
+        try:
+            remaining = int(raw_remaining) if raw_remaining is not None else None
+        except ValueError:
+            remaining = None
+        if response.status_code == 200 and remaining is not None and remaining >= minimum_remaining:
+            return
+        if response.status_code not in {200, 429}:
+            pytest.fail(f"ClickUp rate-budget probe returned HTTP {response.status_code}")
+        raw_retry = response.headers.get("Retry-After")
+        raw_reset = response.headers.get("X-RateLimit-Reset")
+        try:
+            delay = (
+                float(raw_retry)
+                if raw_retry is not None
+                else max(0.0, float(cast(str, raw_reset)) - time.time())
+            )
+        except (TypeError, ValueError):
+            pytest.fail("ClickUp rate-budget probe omitted usable retry/reset headers")
+        if delay > 65.0:
+            pytest.fail(f"ClickUp requested an unexpectedly long live-test wait: {delay:.1f}s")
+        if attempt == 1:
+            break
+        time.sleep(delay + 1.0)
+    pytest.fail(
+        f"ClickUp live-test rate budget remained below {minimum_remaining} after one bounded wait"
+    )
+
+
 @pytest.mark.skipif(
     os.environ.get("CLICKUP_LIVE_TEST") != "1",
     reason="set CLICKUP_LIVE_TEST=1 to enable the destructive sandbox live test",
@@ -138,7 +186,11 @@ def test_live_sandbox_cli_lifecycle(tmp_path: Path) -> None:
     download_path = tmp_path / f"clickup-cli-live-downloaded-{run_marker}.txt"
     manifest_path = tmp_path / f"clickup-cli-live-batch-{run_marker}.jsonl"
 
-    with ClickUpClient(token=token, base_url=base_url) as client:
+    with ClickUpClient(
+        token=token,
+        base_url=base_url,
+        max_retry_after=65.0,
+    ) as client:
         try:
             # All discovery and exact containment proof happen before the first write.
             identity = _invoke(runner, base_url, "auth", "whoami")
@@ -168,6 +220,7 @@ def test_live_sandbox_cli_lifecycle(tmp_path: Path) -> None:
                 space_id=space_id,
                 list_id=list_id,
             )
+            _require_live_rate_budget(token, base_url, minimum_remaining=99)
 
             ensured = _invoke(
                 runner,
@@ -286,7 +339,13 @@ def test_live_sandbox_cli_lifecycle(tmp_path: Path) -> None:
                 "2030-01-02T15:04:05Z",
             )
             assert updated["changed"] is True
-            assert set(updated["fields"]) == {"description", "name", "priority", "start_date"}
+            assert set(updated["fields"]) == {
+                "description",
+                "name",
+                "priority",
+                "start_date",
+                "start_date_time",
+            }
             assert updated["task"]["name"] == updated_name
             assert updated["task"]["description"] == updated_description
             assert updated["task"]["priority"] == "high"
@@ -353,6 +412,7 @@ def test_live_sandbox_cli_lifecycle(tmp_path: Path) -> None:
             batch_readback = _invoke(runner, base_url, "task", "show", attachment_task_id)
             assert batch_readback["task"]["description"] == batch_description
             assert batch_readback["task"]["priority"] == "normal"
+            _require_live_rate_budget(token, base_url, minimum_remaining=99)
 
             comment_text = f"Disposable clickup-cli comment {run_marker}"
             added_comment = _invoke(

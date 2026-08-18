@@ -1410,6 +1410,42 @@ def test_delete_exact_localhost_contract(mock_api: MockClickUpAPI) -> None:
     assert payload["result"]["entry"]["id"] == ENTRY_ID
 
 
+@pytest.mark.parametrize(
+    "delete_response",
+    [{}, {"data": None}, {"data": {}}, {"data": []}, {"data": {"deleted": True}}],
+)
+def test_delete_accepts_missing_response_id_when_null_readback_proves_absence(
+    mock_api: MockClickUpAPI,
+    delete_response: dict[str, Any],
+) -> None:
+    current = entry_payload()
+    expect_entry(mock_api, current)
+    mock_api.expect(
+        "DELETE",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json=delete_response,
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": None},
+    )
+
+    result = invoke(
+        mock_api,
+        ["time", "delete", ENTRY_ID, "--workspace-id", WORKSPACE_ID, "--yes"],
+        json_output=True,
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)["result"]
+    assert payload["changed"] is True
+    assert payload["deleted"] is True
+    assert payload["entry_id"] == ENTRY_ID
+
+
 def test_delete_already_absent_is_idempotent_noop(mock_api: MockClickUpAPI) -> None:
     mock_api.expect(
         "GET",
@@ -1434,24 +1470,38 @@ def test_delete_already_absent_is_idempotent_noop(mock_api: MockClickUpAPI) -> N
     }
 
 
-@pytest.mark.parametrize(
-    "response",
-    [
-        {},
-        {"data": {}},
-        {"data": {"id": "different-entry"}},
-    ],
-)
-def test_delete_missing_or_wrong_response_id_is_outcome_unknown(
+def test_delete_already_absent_null_readback_is_idempotent_noop(
     mock_api: MockClickUpAPI,
-    response: dict[str, Any],
 ) -> None:
+    mock_api.expect(
+        "GET",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={"data": None},
+    )
+
+    result = invoke(
+        mock_api,
+        ["time", "delete", ENTRY_ID, "--workspace-id", WORKSPACE_ID, "--yes"],
+        json_output=True,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["result"] == {
+        "changed": False,
+        "deleted": False,
+        "entry": None,
+        "entry_id": ENTRY_ID,
+    }
+
+
+def test_delete_wrong_response_id_is_outcome_unknown(mock_api: MockClickUpAPI) -> None:
     expect_entry(mock_api, entry_payload())
     mock_api.expect(
         "DELETE",
         f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
         headers=TIME_HEADERS,
-        response_json=response,
+        response_json={"data": {"id": "different-entry"}},
     )
 
     result = invoke(
@@ -1463,6 +1513,31 @@ def test_delete_missing_or_wrong_response_id_is_outcome_unknown(
     assert result.exit_code == 1
     error = json.loads(result.stderr)["error"]
     assert error["type"] == "outcome_unknown"
+    assert error["entry_id"] == ENTRY_ID
+
+
+def test_delete_missing_response_id_but_still_present_fails_verification(
+    mock_api: MockClickUpAPI,
+) -> None:
+    current = entry_payload()
+    expect_entry(mock_api, current)
+    mock_api.expect(
+        "DELETE",
+        f"/api/v2/team/{WORKSPACE_ID}/time_entries/{ENTRY_ID}",
+        headers=TIME_HEADERS,
+        response_json={},
+    )
+    expect_entry(mock_api, current)
+
+    result = invoke(
+        mock_api,
+        ["time", "delete", ENTRY_ID, "--workspace-id", WORKSPACE_ID, "--yes"],
+        json_output=True,
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "verification_failed"
     assert error["entry_id"] == ENTRY_ID
 
 

@@ -156,9 +156,10 @@ the singular read. The POST is never retried.
 Update reads first and sends the smallest body ClickUp permits. Complete tag objects are preserved
 directly; string-only tags are mapped case-insensitively to exactly one full
 `{name,tag_fg,tag_bg}` object from the Workspace catalog before PUT. Running entry timing changes
-are rejected. Delete pre-reads the exact entry, treats pre-read 404 as unchanged, requires the
-official 200 `data.id` to match, then requires singular-read 404. Lost/invalid delete responses or
-failed absence checks preserve `entry_id` in a typed unknown outcome.
+are rejected. Delete pre-reads the exact entry and treats pre-read 404 or the observed HTTP 200
+null/empty singular shape as unchanged. It validates `data.id` when returned, then requires a
+separate 404 or null/empty singular absence proof; production may omit the DELETE response ID.
+Wrong IDs, lost responses, or failed absence checks preserve `entry_id` in a typed unknown outcome.
 
 ## Live-probe and release-harness basis
 
@@ -172,7 +173,8 @@ Before task deletion, an exact task read must still show the sandbox List and ma
 and description; deletion must be followed by HTTP 404. Before manual time-entry deletion, the
 exact captured entry must still carry the marker and point to a run-owned task whose own sandbox
 containment is re-proved. After either the CLI callback or direct-client fallback, cleanup performs
-its own exact GET and requires HTTP 404 before removing the allow-list ID. Cleanup refuses and
+its own exact GET and requires HTTP 404 or observed HTTP 200 null/empty data before removing the
+allow-list ID. Cleanup refuses and
 reports the surviving ID if any proof or absence check fails. No pre-existing time entry is
 deleted, and live coverage never calls timer start or stop.
 
