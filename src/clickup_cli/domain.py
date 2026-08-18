@@ -631,6 +631,12 @@ class TaskService:
             )
         return self._apply_status(task_id, task, current_status, match.label)
 
+    def set_prevalidated_status(self, task_id: str, canonical_status: str) -> MutationResult:
+        """Set a canonical status that was resolved during a read-only batch preflight."""
+
+        task = self._client.get_task(task_id)
+        return self._apply_status(task_id, task, task_status(task), canonical_status)
+
     def complete(self, task_id: str) -> MutationResult:
         task, current_status, statuses = self._context(task_id)
         candidates = {

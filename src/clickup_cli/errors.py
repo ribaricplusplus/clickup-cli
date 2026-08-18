@@ -111,6 +111,18 @@ class InvalidOperationError(ClickUpCLIError):
     error_type = "invalid_operation"
 
 
+class BatchManifestError(ClickUpCLIError):
+    """A batch manifest is unreadable, unsafe, or outside the strict schema."""
+
+    error_type = "invalid_batch_manifest"
+
+
+class BatchPartialFailureError(ClickUpCLIError):
+    """A batch apply stopped or completed with one or more failed operations."""
+
+    error_type = "batch_partial_failure"
+
+
 class CommentNotFoundError(ClickUpCLIError):
     """A requested comment is not present in the task's comment history."""
 

@@ -20,6 +20,12 @@ from clickup_cli.attachments import (
     AttachmentUploadResult,
     validate_attachment_file,
 )
+from clickup_cli.batch import (
+    BatchService,
+    batch_apply_text,
+    batch_plan_text,
+    load_manifest,
+)
 from clickup_cli.client import ClickUpClient
 from clickup_cli.config import DEFAULT_ENV_FILE, resolve_base_url, resolve_token
 from clickup_cli.discovery import (
@@ -41,6 +47,7 @@ from clickup_cli.domain import (
 )
 from clickup_cli.errors import (
     APIError,
+    BatchPartialFailureError,
     ClickUpCLIError,
     ConfirmationError,
     CreatedButAttachmentFailedError,
@@ -86,6 +93,7 @@ priority_app = typer.Typer(no_args_is_help=True, help="Manage task priority.")
 start_date_app = typer.Typer(no_args_is_help=True, help="Manage task start dates.")
 tag_app = typer.Typer(no_args_is_help=True, help="Add and remove task tags.")
 time_app = typer.Typer(no_args_is_help=True, help="Read and safely mutate time entries.")
+batch_app = typer.Typer(no_args_is_help=True, help="Plan and apply strict task manifests.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(task_app, name="task")
 app.add_typer(workspace_app, name="workspace")
@@ -98,6 +106,7 @@ task_app.add_typer(attachment_app, name="attachment")
 task_app.add_typer(priority_app, name="priority")
 task_app.add_typer(start_date_app, name="start-date")
 task_app.add_typer(tag_app, name="tag")
+task_app.add_typer(batch_app, name="batch")
 
 T = TypeVar("T")
 
@@ -133,6 +142,14 @@ def _fail(state: AppState, error: ClickUpCLIError) -> None:
         )
     else:
         typer.echo(f"Error: {error}", err=True)
+        if isinstance(error, BatchPartialFailureError):
+            typer.echo(
+                "Partial outcome: "
+                + json.dumps(
+                    error.details, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+                err=True,
+            )
     raise typer.Exit(code=1)
 
 
@@ -803,6 +820,62 @@ def show_task(
         operation,
         json_result=lambda task: {"task": task},
         text_result=text,
+    )
+
+
+@batch_app.command("plan")
+def plan_task_batch(
+    context: typer.Context,
+    manifest_path: Path = typer.Argument(..., metavar="MANIFEST.jsonl"),
+) -> None:
+    """Validate and plan a bounded JSONL manifest without performing writes."""
+
+    state = _state(context)
+
+    def operation() -> JsonObject:
+        manifest = load_manifest(manifest_path)
+        return _with_client(state, lambda client: BatchService(client).plan(manifest))
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: result,
+        text_result=batch_plan_text,
+    )
+
+
+@batch_app.command("apply")
+def apply_task_batch(
+    context: typer.Context,
+    manifest_path: Path = typer.Argument(..., metavar="MANIFEST.jsonl"),
+    yes: bool = typer.Option(False, "--yes", help="Confirm batch task mutations."),
+    continue_on_error: bool = typer.Option(
+        False,
+        "--continue-on-error",
+        help="Continue with later tasks after an operation failure.",
+    ),
+) -> None:
+    """Preflight the complete manifest, then apply verified operations serially."""
+
+    state = _state(context)
+
+    def operation() -> JsonObject:
+        if not yes:
+            raise ConfirmationError("Batch apply requires --yes")
+        manifest = load_manifest(manifest_path)
+        return _with_client(
+            state,
+            lambda client: BatchService(client).apply(
+                manifest,
+                continue_on_error=continue_on_error,
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: result,
+        text_result=batch_apply_text,
     )
 
 
