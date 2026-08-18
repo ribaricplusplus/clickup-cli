@@ -1,105 +1,164 @@
 # API Contract Provenance
 
-The localhost contract tests are based on ClickUp's official v2 OpenAPI specification and a scoped
-live probe against a disposable sandbox List. This document records why each mock expectation is
-considered valid.
+The localhost contracts are based on ClickUp's official API v2 OpenAPI document and scoped probes
+against a disposable sandbox. This document records the source and the supported wire boundaries;
+it is not a claim of full ClickUp API coverage.
 
 ## Authoritative specification
 
-The v2 OpenAPI document is published at:
+The official document is published at:
 
 - <https://developer.clickup.com/openapi/clickup-api-v2-reference.json>
 
-The snapshot re-inspected on 2026-08-17 had SHA-256:
+The snapshot was re-downloaded and inspected on 2026-08-18. It is OpenAPI 3.1.0, reports API info
+version 2.0, contains 83 paths, and has SHA-256:
 
 ```text
 a0a72ec97ddb4e4859b9ed89b997bb784ba5828412ff35119f41e87103069662
 ```
 
-Relevant endpoint documentation:
+The hash is unchanged from the preceding inspection. No Workspace, Space, Folder, List, user,
+task, comment, attachment, or time-entry identifier from a live account is stored in this
+repository.
+
+Relevant official reference areas include authorized user, Teams/Workspaces, Spaces, Folders,
+Lists, tasks, comments, tags, attachments, time tracking, and rate limits:
 
 - [Get Authorized User](https://developer.clickup.com/reference/getauthorizeduser)
+- [Get Tasks](https://developer.clickup.com/reference/gettasks)
 - [Get Task](https://developer.clickup.com/reference/gettask)
-- [Get List](https://developer.clickup.com/reference/getlist)
-- [Update Task](https://developer.clickup.com/reference/updatetask)
-- [Get Task Comments](https://developer.clickup.com/reference/gettaskcomments)
-- [Create Task Comment](https://developer.clickup.com/reference/createtaskcomment)
 - [Create Task](https://developer.clickup.com/reference/createtask)
+- [Update Task](https://developer.clickup.com/reference/updatetask)
 - [Delete Task](https://developer.clickup.com/reference/deletetask)
+- [Create Task Attachment](https://developer.clickup.com/reference/createtaskattachment)
+- [Time Tracking](https://developer.clickup.com/reference/gettimeentrieswithinadaterange)
 - [Rate Limits](https://developer.clickup.com/docs/rate-limits)
 
-## Supported request contracts
+## Common wire rules
 
-All requests carry `Accept: application/json` and the raw personal token in `Authorization`.
-Requests with a JSON body also carry `Content-Type: application/json`.
+Direct API requests carry `Accept: application/json` and the raw personal token in
+`Authorization`. JSON writes carry `Content-Type: application/json`. Time endpoints also receive
+that content type on otherwise empty bodies where ClickUp's contract expects it. Multipart upload
+uses one `attachment` part. The separate attachment downloader sends no authorization header.
 
-| Operation | Exact request contract |
+API version construction is private to `ClickUpClient`; the supported direct endpoints are v2.
+
+## Discovery and task-read contracts
+
+| Operation | Request |
 | --- | --- |
-| Identity | `GET /api/v2/user`, no body |
-| Read task or status | `GET /api/v2/task/{task_id}`, no body |
-| Discover valid statuses | `GET /api/v2/list/{list_id}`, no body |
+| Identity | `GET /api/v2/user` |
+| Workspaces and members | `GET /api/v2/team` |
+| Spaces | `GET /api/v2/team/{workspace_id}/space?archived=<bool>` |
+| Folders | `GET /api/v2/space/{space_id}/folder?archived=<bool>` |
+| Folderless Lists | `GET /api/v2/space/{space_id}/list?archived=<bool>` |
+| Folder Lists | `GET /api/v2/folder/{folder_id}/list?archived=<bool>` |
+| List detail/statuses | `GET /api/v2/list/{list_id}` |
+| Read task/status/attachments | `GET /api/v2/task/{task_id}` |
+| Tasks in List | `GET /api/v2/list/{list_id}/task?page=<n>&...` |
+| Tasks in Workspace | `GET /api/v2/team/{workspace_id}/task?page=<n>&...` |
+| Task comments | `GET /api/v2/task/{task_id}/comment` |
+| Comment cursor page | `GET /api/v2/task/{task_id}/comment?start=<date>&start_id=<id>` |
+
+Hierarchy traversal composes the catalog reads and sorts normalized results. Scoped task traversal
+passes supported server filters and then reapplies consistent local filters. Deep search enumerates
+Lists; shallow Workspace search may use the Workspace task endpoint. Pagination rejects repeated
+pages and stops at hard page/result ceilings.
+
+Ensure has no new endpoint. It performs a List task search with closed tasks and subtasks included,
+requires zero or one exact normalized name match, and delegates the zero-match path to verified
+task creation.
+
+## Task creation and mutation contracts
+
+| Operation | Exact write shape |
+| --- | --- |
+| Create task | `POST /api/v2/list/{list_id}/task` with `name` and only supplied `description`, `status`, `assignees`, `due_date`, `due_date_time`, and `tags` |
+| General task update | `PUT /api/v2/task/{task_id}` with only changed `name`, `description`, `priority`, `start_date`, `start_date_time`, or `archived` fields |
 | Set status | `PUT /api/v2/task/{task_id}` with only `{"status":"<canonical label>"}` |
-| List comments | `GET /api/v2/task/{task_id}/comment`, no body |
-| Page comments | `GET /api/v2/task/{task_id}/comment?start=<date>&start_id=<id>`, no body |
-| Add comment | `POST /api/v2/task/{task_id}/comment` with exactly `{"comment_text":"<text>","notify_all":false}` |
-| Set date-only due date | `PUT /api/v2/task/{task_id}` with exactly `{"due_date":<UTC-midnight-ms>,"due_date_time":false}` |
-| Set timed due date | `PUT /api/v2/task/{task_id}` with exactly `{"due_date":<instant-ms>,"due_date_time":true}` |
-| Clear due date | `PUT /api/v2/task/{task_id}` with exactly `{"due_date":null}` |
-| Assign user | `PUT /api/v2/task/{task_id}` with exactly `{"assignees":{"add":[<user-id>],"rem":[]}}` |
-| Unassign user | `PUT /api/v2/task/{task_id}` with exactly `{"assignees":{"add":[],"rem":[<user-id>]}}` |
-| Create task | `POST /api/v2/list/{list_id}/task` with `name` plus only explicitly supplied description, status, assignee, due-date, due-date-time, and tag fields |
-| Delete task | `DELETE /api/v2/task/{task_id}`, no body |
+| Set due date | `PUT /api/v2/task/{task_id}` with exact `due_date` milliseconds and `due_date_time` boolean |
+| Clear due date | `PUT /api/v2/task/{task_id}` with only `{"due_date":null}` |
+| Assign user | `PUT /api/v2/task/{task_id}` with `{"assignees":{"add":[<id>],"rem":[]}}` |
+| Unassign user | `PUT /api/v2/task/{task_id}` with `{"assignees":{"add":[],"rem":[<id>]}}` |
+| Add comment | `POST /api/v2/task/{task_id}/comment` with `{"comment_text":"<text>","notify_all":false}` |
+| Add tag | `POST /api/v2/task/{task_id}/tag/{encoded_tag}` with no JSON body |
+| Remove tag | `DELETE /api/v2/task/{task_id}/tag/{encoded_tag}` with no JSON body |
+| Upload attachment | `POST /api/v2/task/{task_id}/attachment` with one multipart `attachment` part |
+| Delete task | `DELETE /api/v2/task/{task_id}` with no body |
 
-`task set-status` and `task complete` deliberately add orchestration around the raw Update Task
-endpoint. The required sequence is task read, List read, minimal PUT when needed, then a separate
-task read that must confirm the canonical status. Invalid and idempotent transitions stop before the
-PUT.
+Task creation reads the returned ID, fetches that task, and verifies destination List, name, and
+every supplied supported field. Date-only values are allowed to be canonicalized to another
+millisecond value on the same UTC calendar date; timed values require exact instant equality.
+Attachment-aware create validates every file before the task POST, then performs and verifies
+uploads in option order.
 
-Comment creation is followed by `GET /task/{task_id}/comment`; the comment ID returned by the POST
-must be present with exact text. Due-date and assignee operations read the task before a write,
-avoid an observable no-op, and read the task afterward. Timed due dates require exact millisecond
-read-back. ClickUp can canonicalize a date-only millisecond value for an account while retaining the
-same calendar date, so date-only verification compares the UTC date and reports the observed
-`due_date_ms`. If the API exposes `due_date_time`, its value is also verified. Assignment read-back
-requires the target numeric user ID to be present or absent as requested.
+General mutations read first and omit already-satisfied fields. A changed request is followed by a
+task read that verifies each requested field. Tag and assignee changes are idempotent. Status
+changes additionally fetch the task's List and resolve exactly one canonical label before the
+write. Semantic completion selects only recognized completion labels/types.
 
-Comment lookup has no single-comment endpoint in API v2. `task comment show` therefore extracts a
-comment ID from the supplied ClickUp deep link or accepts it separately, reads the newest comment
-page, and advances with the last comment's documented `start` and `start_id` cursor until it finds
-the ID or reaches an empty page. Repeated cursors and excessive pagination fail closed.
+Comment creation is verified by returned ID and exact text in a comment listing. Exact comment
+lookup has no single-comment v2 endpoint, so it uses the documented cursor pair until the ID is
+found or the bounded search reaches the end.
 
-Task creation accepts the same validated date-only or timezone-aware due-date model as the update
-command and repeatable, normalized tag names. The initial POST includes all requested fields so the
-operation does not require follow-up mutation calls. A separate `GET /task/{task_id}` then verifies
-the returned ID, destination List, name, description, status, requested assignees, requested tags,
-and due date before success is reported. Final stable-output normalization stays inside the same
-partial-outcome boundary. If the POST response is lost or unusable before an ID is known, the CLI
-returns `outcome_unknown` and instructs callers to inspect the List before retrying. Any failure
-after an ID is known returns `created_but_unverified` with a structured `task_id`.
+Attachment upload requires the returned ID and title on a fresh task read. Download is not a
+ClickUp API call after that authoritative read: a credential-free client follows at most five
+revalidated redirects and streams at most 100 MiB into an atomic local output operation.
 
-## Live probe
+## Batch contracts
 
-On 2026-08-17, development included one disposable lifecycle probe against a dedicated ClickUp
-sandbox List. No production task was used, and no workspace, List, task, or user identifier is stored
-in this repository.
+Batch adds no endpoint. Strict JSONL parsing occurs before a client is created. Plan and apply both
+perform a complete task-read preflight; any requested status also causes the relevant List read.
+Plan returns after those reads.
 
-The probe confirmed:
+Apply requires `--yes` before reading the manifest or using credentials. After preflight, each
+operation delegates to the same task/status/due-date/assignee/tag/lifecycle service described
+above. Operations and tasks are serial. A failure reports the manifest hash, exact line/task and
+operation, completed IDs, operation results, and last verified task state. No rollback request is
+issued.
 
-1. Task creation and read-back used the configured sandbox List.
-2. Comment creation and listing returned the same generated comment ID and exact text.
-3. Date-only due-date set, timed due-date set, and clear were each confirmed by separate task reads.
-4. The date-only write was canonicalized by ClickUp to a different millisecond value on the same UTC
-   calendar date, while the timed instant was preserved exactly.
-5. Assigning and then unassigning the authenticated sandbox user was confirmed by separate task
-   reads.
-6. Status update and semantic completion were confirmed by separate task reads.
-7. `DELETE /api/v2/task/{task_id}` succeeded and the final task read returned HTTP 404.
+## Time-entry contracts
 
-The opt-in live pytest repeats a fuller CLI lifecycle and always attempts deletion in `finally`.
-Ordinary tests and CI use only the localhost mock server.
+| Operation | Request |
+| --- | --- |
+| Current timer | `GET /api/v2/team/{workspace_id}/time_entries/current` with optional `assignee` |
+| Bounded list | `GET /api/v2/team/{workspace_id}/time_entries?start_date=<ms>&end_date=<ms>&...` |
+| Single entry read | `GET /api/v2/team/{workspace_id}/time_entries/{entry_id}` |
+| Start timer | `POST /api/v2/team/{workspace_id}/time_entries/start` with only supplied `tid`, `description`, and `billable` |
+| Stop timer | `POST /api/v2/team/{workspace_id}/time_entries/stop` with an empty body |
+| Add manual entry | `POST /api/v2/team/{workspace_id}/time_entries` with exact `start`/`duration` and only supplied `tid`, `description`, and `billable` |
+| Update entry | `PUT /api/v2/team/{workspace_id}/time_entries/{entry_id}` with required preserved `tags` plus only changed supported fields |
+| Delete entry | `DELETE /api/v2/team/{workspace_id}/time_entries/{entry_id}` with an empty body |
+
+Time list ranges are start-inclusive and end-exclusive and cannot exceed 366 days. Only one task,
+Space, Folder, or List location filter is sent. Current timer is read before start; an existing
+timer prevents the write. Stop captures the current ID before writing and then proves it is no
+longer current.
+
+Manual add extracts the returned ID and verifies a single-entry read. Update reads first, sends the
+smallest body ClickUp permits while preserving tag metadata, and verifies every requested field.
+Running entry timing changes are rejected. Non-idempotent/ambiguous failures carry a Workspace,
+entry, or stopped-entry ID whenever one is known.
+
+## Live-probe and release-harness basis
+
+Development probes use only a dedicated disposable sandbox. The opt-in pytest repeats one broader
+lifecycle, but its first possible write is dominated by an exact containment proof: configured
+List ID, exact List name `ClickUp CLI Test Sandbox`, configured Space ID, and membership of that
+Space/List in the configured Workspace tree.
+
+All temporary content carries a new UUID. Cleanup maps contain only IDs returned by that run.
+Before task deletion, an exact task read must still show the sandbox List and marker in both name
+and description; deletion must be followed by HTTP 404. Before manual time-entry deletion, the
+exact captured entry must still carry the marker and point to a run-owned task whose own sandbox
+containment is re-proved. Cleanup refuses and reports the surviving ID if any proof fails. No
+pre-existing time entry is deleted, and live coverage never calls timer start or stop.
+
+Ordinary tests and CI use localhost only and select `-m 'not live'`.
 
 ## Rate-limit basis
 
-ClickUp documents HTTP 429 responses with an absolute Unix timestamp in
-`X-RateLimit-Reset`. The client also accepts standard `Retry-After` values. Both paths are bounded
-and covered by deterministic tests with an injected clock and sleep function.
+ClickUp documents HTTP 429 responses with an absolute Unix timestamp in `X-RateLimit-Reset`. The
+client also accepts standard `Retry-After` seconds or HTTP dates. Delay and retry count are bounded
+and covered with injected clock/sleep functions. GET, PUT, and DELETE may be retried; potentially
+non-idempotent POSTs are not blindly retried.

@@ -6,20 +6,57 @@ Until the first stable release, security fixes are made on the latest release li
 
 ## Reporting a vulnerability
 
-Please use GitHub's private vulnerability reporting feature for this repository. Do not open a
-public issue containing exploit details, credentials, task data, workspace identifiers, or other
-sensitive information.
+Use GitHub's private vulnerability reporting feature for this repository. Do not open a public
+issue containing exploit details, credentials, task data, Workspace/Space/Folder/List identifiers,
+user identifiers, attachment URLs, time-entry identifiers, or other sensitive information.
 
-Include the affected version, impact, reproduction steps using synthetic data, and any suggested
-mitigation. Maintainers will acknowledge a complete report as soon as practical and coordinate a
-fix and disclosure timeline.
+Include the affected version, impact, and reproduction steps using synthetic data. Maintainers will
+acknowledge a complete report as soon as practical and coordinate a fix and disclosure timeline.
 
-## Credential handling
+## Credential and transport boundaries
 
-The CLI intentionally has no `--token` option. Tokens are read from `CLICKUP_API_TOKEN` or a
-non-executable dotenv file, sent as the raw ClickUp `Authorization` value, redacted from expected
-errors, and never included in normal output. Users remain responsible for restricting env-file
-permissions, using sandbox Lists for testing, and rotating a token that may have been exposed.
-Custom non-local API bases must use HTTPS; plaintext HTTP is accepted only for localhost tests.
-The client disables ambient HTTP proxy discovery so a raw ClickUp token cannot be redirected by
-`HTTP_PROXY`, `HTTPS_PROXY`, or related process configuration.
+The CLI has no `--token` option. Tokens are read from `CLICKUP_API_TOKEN` or a non-executable dotenv
+file and are sent as the raw ClickUp `Authorization` value. Expected errors redact the configured
+token. Tokens do not belong in normal output, manifests, docs, fixtures, issue reports, or source
+control.
+
+Custom non-local API bases require HTTPS; plaintext HTTP is accepted only for localhost tests. The
+direct client disables ambient proxy discovery so `HTTP_PROXY`, `HTTPS_PROXY`, and related process
+configuration cannot redirect a raw token. Attachment downloads use an entirely separate client
+and never receive the ClickUp authorization header. Redirect targets are revalidated, non-local
+downloads require HTTPS, and byte/redirect counts are bounded.
+
+Users remain responsible for restrictive env-file permissions and immediate rotation of any token
+that may have been exposed.
+
+## Mutation and automation boundaries
+
+Supported task and time mutations read the state needed to validate or minimize a write and verify
+the result afterward. Statuses are resolved against the task's List. Batch manifests are treated as
+untrusted input, strictly parsed and bounded, and completely preflighted before apply writes.
+`batch apply`, task deletion, and time-entry deletion require explicit confirmation. Batch is
+serial but not transactional; callers must inspect structured partial results rather than assume a
+rollback.
+
+Unknown outcomes from non-idempotent operations are never presented as safe failures to retry.
+When an ID is known, partial errors preserve it for inspection. When no ID is known, callers should
+search the narrow destination and time range before deciding whether to retry.
+
+## Live-test containment
+
+The opt-in live test is destructive only within one dedicated List. It is disabled unless
+`CLICKUP_LIVE_TEST=1` and requires separate Workspace, Space, List, and existing tag configuration.
+Before writing, the configured List must return its exact ID, the exact name
+`ClickUp CLI Test Sandbox`, and the exact configured Space; a Workspace tree must independently
+prove the Space/List membership.
+
+Every temporary resource carries a per-run UUID. Cleanup allow-lists contain only returned IDs.
+Task cleanup fetches the exact task and re-proves the sandbox List plus markers in both name and
+description before deletion, then requires HTTP 404. Manual time-entry cleanup fetches only the ID
+captured during that run and requires its marker and attachment to a run-owned sandbox task. Failed
+proof means refusal and a surviving-ID report, never deletion. Time `start` and `stop` are excluded
+from live coverage to avoid racing a human timer.
+
+Never configure the live test with a production List, and never commit the configured IDs or token.
+Ordinary CI must continue to run `-m 'not live'` without credentials and with non-local sockets
+blocked.

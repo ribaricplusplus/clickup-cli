@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import tomllib
+from pathlib import Path
 from typing import Any
 
 from typer.testing import CliRunner
 
+from clickup_cli import __version__
 from clickup_cli.cli import app
 from tests.conftest import MockClickUpAPI
 
@@ -80,8 +83,16 @@ def test_version_is_credential_free_and_makes_no_request(mock_api: MockClickUpAP
     result = runner.invoke(app, ["--version"], env={})
 
     assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == "clickup 0.1.0"
+    assert result.stdout.strip() == "clickup 0.2.0"
     assert mock_api.state.requests == []
+
+
+def test_release_versions_are_exact() -> None:
+    project_file = Path(__file__).parents[1] / "pyproject.toml"
+    project = tomllib.loads(project_file.read_text(encoding="utf-8"))
+
+    assert project["project"]["version"] == "0.2.0"
+    assert __version__ == "0.2.0"
 
 
 def test_whoami_exact_wire_contract_and_json_schema(mock_api: MockClickUpAPI) -> None:
