@@ -123,7 +123,9 @@ def test_show_accepts_workspace_url_and_normalizes_json(mock_api: MockClickUpAPI
         "ok": True,
         "result": {
             "task": {
+                "archived": None,
                 "assignees": [],
+                "attachments": [],
                 "description": "Synthetic task description",
                 "due_date": None,
                 "due_date_ms": None,
@@ -132,6 +134,10 @@ def test_show_accepts_workspace_url_and_normalizes_json(mock_api: MockClickUpAPI
                 "list_id": LIST_ID,
                 "list_name": None,
                 "name": "Synthetic task",
+                "priority": None,
+                "start_date": None,
+                "start_date_ms": None,
+                "start_date_time": None,
                 "status": "Open",
                 "status_type": "open",
                 "tags": [],

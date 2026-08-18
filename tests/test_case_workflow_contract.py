@@ -56,7 +56,9 @@ def comment_payload(comment_id: str, text: str, date: str) -> dict[str, Any]:
 
 def expected_rich_summary() -> dict[str, Any]:
     return {
+        "archived": None,
         "assignees": [{"email": "bruno@example.invalid", "id": "42", "username": "Bruno"}],
+        "attachments": [],
         "description": "Check the linked comment.",
         "due_date": "2030-01-02",
         "due_date_ms": DATE_ONLY_CANONICAL_MS,
@@ -65,6 +67,10 @@ def expected_rich_summary() -> dict[str, Any]:
         "list_id": LIST_ID,
         "list_name": "Todos",
         "name": "Check Alina's Filtracon / Enso comment",
+        "priority": None,
+        "start_date": None,
+        "start_date_ms": None,
+        "start_date_time": None,
         "status": "backlog",
         "status_type": "open",
         "tags": ["focus"],
