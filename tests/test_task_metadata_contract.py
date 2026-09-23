@@ -98,7 +98,23 @@ def test_comment_list_exact_contract_and_json_shape(mock_api: MockClickUpAPI) ->
     result = invoke(mock_api, ["task", "comment", "list", TASK_URL])
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == {
+    output = json.loads(result.stdout)
+    entry = output["result"]["comments"][0]
+    assert len(entry["revision_sha256"]) == 64
+    assert entry["segments"] == [{"text": "Deterministic comment"}]
+    assert {
+        **output,
+        "result": {
+            **output["result"],
+            "comments": [
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if key not in {"revision_sha256", "segments", "mentions"}
+                }
+            ],
+        },
+    } == {
         "ok": True,
         "result": {
             "comments": [
@@ -141,7 +157,21 @@ def test_comment_add_exact_post_then_readback_contract(mock_api: MockClickUpAPI)
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == {
+    output = json.loads(result.stdout)
+    entry = output["result"]["comment"]
+    assert len(entry["revision_sha256"]) == 64
+    assert entry["segments"] == [{"text": "Deterministic comment"}]
+    assert {
+        **output,
+        "result": {
+            **output["result"],
+            "comment": {
+                key: value
+                for key, value in entry.items()
+                if key not in {"revision_sha256", "segments", "mentions"}
+            },
+        },
+    } == {
         "ok": True,
         "result": {
             "comment": {

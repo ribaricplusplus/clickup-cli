@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -431,10 +433,42 @@ def summarize_comment(comment: JsonObject) -> JsonObject:
         user_id = _optional_string(user.get("id"))
         username = str(user["username"]) if isinstance(user.get("username"), str) else None
     resolved = comment.get("resolved")
+    segments = comment.get("comment")
+    if segments is not None and not isinstance(segments, list):
+        raise APIError("ClickUp response contains invalid rich comment segments")
+    normalized_segments: list[JsonObject] = []
+    mention_ids: list[str] = []
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            raise APIError("ClickUp response contains an invalid rich comment segment")
+        tag = segment.get("type") == "tag"
+        if tag:
+            member = segment.get("user")
+            if not isinstance(member, dict):
+                raise APIError("ClickUp response contains a tag without a user")
+            identifier = _required_string(member.get("id"), label="mentioned user ID")
+            mention_ids.append(identifier)
+            normalized_segments.append({**segment, "user": {**member, "id": identifier}})
+        else:
+            raw_segment_text = segment.get("text")
+            if not isinstance(raw_segment_text, str):
+                raise APIError("ClickUp response contains an invalid rich text segment")
+            normalized_segments.append(dict(segment))
+    revision = hashlib.sha256(
+        json.dumps(
+            {"id": comment_id, "text": text, "segments": normalized_segments},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "date": _optional_string(comment.get("date")),
         "id": comment_id,
+        "mentions": cast(list[JsonValue], mention_ids),
         "resolved": resolved if isinstance(resolved, bool) else None,
+        "revision_sha256": revision,
+        "segments": cast(list[JsonValue], normalized_segments),
         "text": text,
         "user_id": user_id,
         "username": username,

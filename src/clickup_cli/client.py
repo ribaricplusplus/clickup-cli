@@ -8,14 +8,14 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
 from clickup_cli.errors import APIError, InvalidOperationError, TransportError
 from clickup_cli.refs import validate_native_id, validate_numeric_id
-from clickup_cli.types import JsonObject
+from clickup_cli.types import JsonObject, JsonValue
 
 
 class ClickUpClient:
@@ -403,6 +403,23 @@ class ClickUpClient:
             f"/task/{task_id}/comment",
             json_body={"comment_text": comment_text, "notify_all": False},
         )
+
+    def create_rich_comment(
+        self, task_id: str, segments: list[JsonObject], *, notify_all: bool
+    ) -> JsonObject:
+        task_id = validate_native_id(task_id, label="TASK_ID")
+        return self._object_response(
+            "POST",
+            f"/task/{task_id}/comment",
+            json_body={"comment": cast(list[JsonValue], segments), "notify_all": notify_all},
+        )
+
+    def update_rich_comment(self, comment_id: str, segments: list[JsonObject]) -> None:
+        comment_id = validate_native_id(comment_id, label="COMMENT_ID")
+        response = self._request(
+            "PUT", f"/comment/{comment_id}", json_body={"comment": cast(list[JsonValue], segments)}
+        )
+        response.close()
 
     def update_task_due_date(
         self,

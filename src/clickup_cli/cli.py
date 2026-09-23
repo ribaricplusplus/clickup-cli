@@ -29,6 +29,7 @@ from clickup_cli.batch import (
 )
 from clickup_cli.client import ClickUpClient
 from clickup_cli.config import resolve_base_url, resolve_settings, resolve_token
+from clickup_cli.context_comments import RichCommentService, TaskContextService
 from clickup_cli.discovery import (
     DEFAULT_TASK_LIMIT,
     MAX_TASK_RESULTS,
@@ -815,6 +816,54 @@ def ensure_task(
     )
 
 
+@task_app.command("context")
+def task_context(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    comments: int = typer.Option(10, "--comments", help="Maximum recent comments (0-100)."),
+    attachments: int = typer.Option(10, "--attachments", help="Maximum attachments (0-100)."),
+) -> None:
+    """Read a bounded task dossier with list path, statuses, comments and attachments."""
+    state = _state(context)
+
+    def operation() -> JsonObject:
+        task_id = parse_task_ref(task_ref)
+        return _with_client(
+            state,
+            lambda client: TaskContextService(client).get(
+                task_id, comments=comments, attachments=attachments
+            ),
+        )
+
+    def text(result: JsonObject) -> str:
+        task = cast(JsonObject, result["task"])
+        comments_page = cast(JsonObject, result["comments"])
+        attachments_page = cast(JsonObject, result["attachments"])
+        statuses = cast(list[JsonObject], result["statuses"])
+        return "\n".join(
+            [
+                f"{task['id']} {task['name']} [{task['status']}]",
+                f"Path: {' / '.join(cast(list[str], result['path']))}",
+                "Valid statuses: " + ", ".join(str(item["status"]) for item in statuses),
+                f"Parent: {result['parent_id'] or '-'}; "
+                f"subtasks: {', '.join(cast(list[str], result['subtask_ids'])) or '-'}",
+                f"Comments ({comments_page['returned_count']}, more={comments_page['has_more']}):",
+                *[
+                    f"  {item['id']}: {item['text']}"
+                    for item in cast(list[JsonObject], comments_page["items"])
+                ],
+                f"Attachments ({attachments_page['returned_count']}, "
+                f"more={attachments_page['has_more']}):",
+                *[
+                    f"  {item['id']}: {item['title']}"
+                    for item in cast(list[JsonObject], attachments_page["items"])
+                ],
+            ]
+        )
+
+    _execute(state, operation, json_result=lambda result: result, text_result=text)
+
+
 @task_app.command("show")
 def show_task(
     context: typer.Context, task_ref: str = typer.Argument(..., metavar="TASK_REF")
@@ -1038,13 +1087,26 @@ def add_comment(
     context: typer.Context,
     task_ref: str = typer.Argument(..., metavar="TASK_REF"),
     text: str = typer.Argument(..., metavar="TEXT"),
+    mention: list[str] | None = typer.Option(
+        None, "--mention", help="Repeatable exact Workspace member ID, username or email."
+    ),
+    notify_all: bool = typer.Option(
+        False, "--notify-all", help="Request ClickUp's broad notification behavior."
+    ),
 ) -> None:
-    """Add a plain-text task comment and verify it by readback."""
+    """Add a comment, optionally with native user mentions, and verify by ID."""
 
     state = _state(context)
 
     def operation() -> CommentMutationResult:
         task_id = parse_task_ref(task_ref)
+        if mention or notify_all:
+            return _with_client(
+                state,
+                lambda client: RichCommentService(client).add(
+                    task_id, text, mentions=mention or [], notify_all=notify_all
+                ),
+            )
         return _with_client(state, lambda client: TaskService(client).add_comment(task_id, text))
 
     _execute(
@@ -1052,6 +1114,36 @@ def add_comment(
         operation,
         json_result=_comment_json,
         text_result=lambda result: f"Added comment {result.comment.get('id')} to {result.task_id}",
+    )
+
+
+@comment_app.command("edit")
+def edit_comment(
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    comment_ref: str = typer.Argument(..., metavar="COMMENT_REF"),
+    text: str = typer.Argument(..., metavar="TEXT"),
+    expect_sha256: str = typer.Option(
+        ..., "--expect-sha256", help="Revision from comment show/list."
+    ),
+) -> None:
+    """Preflight revision, preserve native mentions, PUT, and read back exact ID."""
+    state = _state(context)
+
+    def operation() -> CommentMutationResult:
+        task_id, comment_id = parse_comment_ref(task_ref, comment_ref)
+        return _with_client(
+            state,
+            lambda client: RichCommentService(client).edit(
+                task_id, comment_id, text, expected_sha256=expect_sha256
+            ),
+        )
+
+    _execute(
+        state,
+        operation,
+        json_result=_comment_json,
+        text_result=lambda result: f"Edited comment {result.comment.get('id')} on {result.task_id}",
     )
 
 

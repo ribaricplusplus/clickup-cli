@@ -92,8 +92,8 @@ The root groups and their current responsibilities are:
 | `workspace` | `list`, `tree` |
 | `member` | `list` |
 | `list` | `show`, `statuses` |
-| `task` | `list`, `search`, `ensure`, `show`, `create`, `update`, `status`, `set-status`, `complete`, `assign`, `unassign`, `archive`, `unarchive`, `delete` |
-| `task comment` | `show`, `list`, `add` |
+| `task` | `list`, `search`, `ensure`, `show`, `context`, `create`, `update`, `status`, `set-status`, `complete`, `assign`, `unassign`, `archive`, `unarchive`, `delete` |
+| `task comment` | `show`, `list`, `add`, `edit` |
 | `task due-date` | `set`, `clear` |
 | `task priority` | `clear` |
 | `task start-date` | `clear` |
@@ -207,16 +207,45 @@ Read task state, comments, and status with:
 
 ```console
 clickup task show '<task-id-or-url>'
+clickup --json task context '<task-id-or-url>' --comments 10 --attachments 5
 clickup task status '<task-id-or-url>'
 clickup task comment list '<task-id-or-url>'
 clickup task comment add '<task-id-or-url>' 'A concise update'
+clickup task comment add '<task-id-or-url>' 'Please review' --mention 101 --mention alex@example.org
 clickup task comment show '<task-id-or-url>' '<comment-id>'
 clickup task comment show 'https://app.clickup.com/t/<task-id>?comment=<comment-id>'
+clickup task comment edit '<task-id-or-url>' '<comment-id>' 'Updated message' --expect-sha256 '<revision_sha256>'
 ```
+
+`task context` reads the exact task, its home List and valid statuses, then only enough comment
+cursor pages to fulfill `--comments` (default 10, maximum 100); attachments come from that same
+task response (`--attachments` default 10, maximum 100). Zero skips comment retrieval. JSON
+includes `task`, `list`, `path` (Space / real Folder / List), `statuses`, `parent_id`,
+`subtask_ids`, and bounded `comments` and `attachments` objects with `items`, `returned_count`,
+`has_more`, and `cursor`. `has_more: null` means the API did not establish completeness; `true`
+means a local page contained additional items, `false` means an empty comment page proved the end.
+Only comments have an API cursor (`start` and `start_id`); attachments have no supported cursor.
+ClickUp's synthetic `hidden` folder on folderless Lists is omitted from the context path.
 
 Comment lookup follows ClickUp's cursor until it finds the requested ID or safely reaches the end.
 Comment creation always sends `notify_all: false` and verifies the returned comment ID and exact
-text; ClickUp's ordinary notification rules can still apply.
+text when no mention is supplied. With one or more `--mention` options, it reads the task's
+Workspace membership, resolves only exact case-insensitive username/email or numeric member ID,
+refuses ambiguous names and nonmembers, and sends native rich `tag` segments followed by text.
+`--notify-all` explicitly sets `notify_all: true`; `false` does **not** suppress normal
+assignee/watcher notifications. Rich writes verify the exact returned comment ID, tag IDs and text
+segments. A disconnected POST is `outcome_unknown` and is never automatically retried; a known
+created ID with failed readback is returned as `created_but_unverified` with `comment_id`.
+
+Comment `show`/`list` JSON now adds `revision_sha256`, `segments`, and `mentions` to each comment
+without removing existing fields. The hash covers the normalized comment ID, flattened text and
+rich segments (not the mutable display date). Editing requires a current hash: the CLI reads the
+exact task/comment, rejects a stale hash before the PUT, sends only a rich `comment` array to
+`PUT /api/v2/comment/{id}`, preserves native mention tags before the new text, and reads back that
+exact ID and segments. This preflight is **not atomic compare-and-swap**: another writer can edit
+between GET and PUT. Editing replaces the message's non-tag content, so review any rich formatting
+before editing; never blindly retry an uncertain write. A failed post-PUT readback reports
+`edited_but_unverified` with the exact `comment_id`.
 
 Update one or more supported fields in one minimal PUT and one readback:
 

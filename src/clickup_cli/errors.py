@@ -135,6 +135,18 @@ class CommentNotFoundError(ClickUpCLIError):
     error_type = "comment_not_found"
 
 
+class StaleCommentRevisionError(ClickUpCLIError):
+    """The comment changed since the caller read its revision."""
+
+    error_type = "stale_comment_revision"
+
+
+class EditedButUnverifiedError(ClickUpCLIError):
+    """A comment PUT completed but exact-ID readback did not verify it."""
+
+    error_type = "edited_but_unverified"
+
+
 class CompletionStatusError(ClickUpCLIError):
     """The task's home list has no semantic completion status."""
 

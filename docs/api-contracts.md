@@ -62,6 +62,11 @@ API version construction is private to `ClickUpClient`; the supported direct end
 | Task comments | `GET /api/v2/task/{task_id}/comment` |
 | Comment cursor page | `GET /api/v2/task/{task_id}/comment?start=<date>&start_id=<id>` |
 
+`task context` uses exactly the task and home-List GETs plus bounded comment pages (unless
+`--comments 0`), never a workspace tree. It slices task attachments locally, omits the synthetic
+`hidden` folder, and reports count, tri-state `has_more`, and a comment cursor when observed. A
+missing provider completion flag is unknown unless overfetch or an empty page proves otherwise.
+
 Hierarchy traversal composes the catalog reads and sorts normalized results. Scoped task traversal
 passes supported server filters and then reapplies consistent local filters. Deep search enumerates
 Lists; shallow Workspace search may use the Workspace task endpoint. Pagination rejects repeated
@@ -84,6 +89,8 @@ task creation.
 | Assign user | `PUT /api/v2/task/{task_id}` with `{"assignees":{"add":[<id>],"rem":[]}}` |
 | Unassign user | `PUT /api/v2/task/{task_id}` with `{"assignees":{"add":[],"rem":[<id>]}}` |
 | Add comment | `POST /api/v2/task/{task_id}/comment` with `{"comment_text":"<text>","notify_all":false}` |
+| Add rich comment | `POST /api/v2/task/{task_id}/comment` with `{"comment":[{"type":"tag","user":{"id":<id>}},{"text":" <text>"}],"notify_all":false}`; repeated tags are separate segments; explicit `--notify-all` changes only the boolean |
+| Edit comment | `PUT /api/v2/comment/{comment_id}` with `{"comment":[<preserved native tags>,{"text":" <replacement>"}]}` |
 | Add tag | `POST /api/v2/task/{task_id}/tag/{encoded_tag}` with no JSON body |
 | Remove tag | `DELETE /api/v2/task/{task_id}/tag/{encoded_tag}` with no JSON body |
 | Upload attachment | `POST /api/v2/task/{task_id}/attachment` with one multipart `attachment` part |
@@ -103,6 +110,16 @@ write. Semantic completion selects only recognized completion labels/types.
 Comment creation is verified by returned ID and exact text in a comment listing. Exact comment
 lookup has no single-comment v2 endpoint, so it uses the documented cursor pair until the ID is
 found or the bounded search reaches the end.
+
+Rich creation first checks the task ID and its `team_id`, then resolves mention IDs or exact
+username/email only against `GET /api/v2/team` members of that Workspace. Ambiguous/nonmember
+references fail before POST. No POST retry follows ambiguous transport outcomes. Once an ID is
+returned, failed readback carries that ID in a structured partial outcome. `notify_all: false` is
+not a promise to suppress assignee/watcher notifications. Edit preflights task and exact comment,
+compares `--expect-sha256` to the normalized ID/text/rich-segments digest, rejects unsupported or
+interleaved rich layouts before PUT, preserves native tags, and verifies exact-ID rich readback.
+This is a preflight guard, not an atomic CAS; a concurrent writer can change the comment between
+read and PUT. Existing show/list fields remain and add `revision_sha256`, `segments`, `mentions`.
 
 Attachment upload requires the returned ID and title on a fresh task read. Download is not a
 ClickUp API call after that authoritative read: a credential-free client follows at most five

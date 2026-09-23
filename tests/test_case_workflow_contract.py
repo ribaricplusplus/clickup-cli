@@ -403,7 +403,21 @@ def test_comment_show_accepts_clickup_deep_link(mock_api: MockClickUpAPI) -> Non
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == {
+    output = json.loads(result.stdout)
+    entry = output["result"]["comment"]
+    assert len(entry["revision_sha256"]) == 64
+    assert entry["segments"] == []  # Legacy ClickUp response has only comment_text.
+    assert {
+        **output,
+        "result": {
+            **output["result"],
+            "comment": {
+                key: value
+                for key, value in entry.items()
+                if key not in {"revision_sha256", "segments", "mentions"}
+            },
+        },
+    } == {
         "ok": True,
         "result": {
             "comment": {
