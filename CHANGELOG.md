@@ -17,7 +17,8 @@ Changelog, and the project intends to use Semantic Versioning.
   timezone while timed timestamps retain their absolute meaning; UTC remains the default.
 - Task creation verifies formatting-equivalent ClickUp description readbacks without mistaking
   stripped trailing whitespace for failure, while preserving a known task ID on real mismatches.
-- Comment writes expose uncertain and known-ID partial outcomes instead of inviting blind retries.
+- Comment writes expose uncertain and known-ID partial outcomes instead of inviting blind retries;
+  task-comment reads preserve provider-opaque tag segments without fabricating mention IDs.
 
 ## [0.2.0] - 2026-08-18
 

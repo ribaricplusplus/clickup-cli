@@ -444,8 +444,13 @@ def summarize_comment(comment: JsonObject) -> JsonObject:
         tag = segment.get("type") == "tag"
         if tag:
             member = segment.get("user")
+            if "user" not in segment:
+                # ClickUp can return an opaque native tag in task-comment reads.
+                # Keep it visible but do not invent an identity for verification.
+                normalized_segments.append(dict(segment))
+                continue
             if not isinstance(member, dict):
-                raise APIError("ClickUp response contains a tag without a user")
+                raise APIError("ClickUp response contains an invalid tagged user")
             identifier = _required_string(member.get("id"), label="mentioned user ID")
             mention_ids.append(identifier)
             normalized_segments.append({**segment, "user": {**member, "id": identifier}})

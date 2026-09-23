@@ -105,6 +105,15 @@ def comment(
     }
 
 
+def test_provider_opaque_tag_remains_readable_without_inventing_a_member_id() -> None:
+    summary = summarize_comment(
+        comment("c1", "Acceptance text@Bruno", [{"type": "tag"}, {"text": "Acceptance text"}])
+    )
+    assert summary["segments"] == [{"type": "tag"}, {"text": "Acceptance text"}]
+    assert summary["mentions"] == []
+    assert summary["text"] == "Acceptance text@Bruno"
+
+
 def test_context_reads_only_one_comment_page_and_reports_unknown_completeness(
     mock_api: MockClickUpAPI,
 ) -> None:

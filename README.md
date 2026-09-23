@@ -233,19 +233,24 @@ text when no mention is supplied. With one or more `--mention` options, it reads
 Workspace membership, resolves only exact case-insensitive username/email or numeric member ID,
 refuses ambiguous names and nonmembers, and sends native rich `tag` segments followed by text.
 `--notify-all` explicitly sets `notify_all: true`; `false` does **not** suppress normal
-assignee/watcher notifications. Rich writes verify the exact returned comment ID, tag IDs and text
-segments. A disconnected POST is `outcome_unknown` and is never automatically retried; a known
-created ID with failed readback is returned as `created_but_unverified` with `comment_id`.
+assignee/watcher notifications. Rich writes require the returned tag IDs and text segments to
+match the request. A disconnected POST is `outcome_unknown` and is never automatically retried; a
+known created ID with failed readback is returned as `created_but_unverified` with `comment_id`.
+ClickUp can return an opaque `{"type":"tag"}` segment without `user.id` (observed for a
+self-mention in the Test Workspace), even though flattened `comment_text` renders `@Name`. The
+CLI preserves such segments for reads but **does not infer a user ID from display text**: the
+mention write remains `created_but_unverified` with its exact ID, and editing that opaque tag is
+refused. Inspect the comment in ClickUp before deciding whether to retry; do not post a duplicate.
 
 Comment `show`/`list` JSON now adds `revision_sha256`, `segments`, and `mentions` to each comment
 without removing existing fields. The hash covers the normalized comment ID, flattened text and
 rich segments (not the mutable display date). Editing requires a current hash: the CLI reads the
 exact task/comment, rejects a stale hash before the PUT, sends only a rich `comment` array to
-`PUT /api/v2/comment/{id}`, preserves native mention tags before the new text, and reads back that
-exact ID and segments. This preflight is **not atomic compare-and-swap**: another writer can edit
-between GET and PUT. Editing replaces the message's non-tag content, so review any rich formatting
-before editing; never blindly retry an uncertain write. A failed post-PUT readback reports
-`edited_but_unverified` with the exact `comment_id`.
+`PUT /api/v2/comment/{id}`, preserves **identifiable** native mention tags before the new text,
+and reads back that exact ID and segments. This preflight is **not atomic compare-and-swap**:
+another writer can edit between GET and PUT. Editing replaces the message's non-tag content, so
+review any rich formatting before editing; never blindly retry an uncertain write. A failed
+post-PUT readback reports `edited_but_unverified` with the exact `comment_id`.
 
 Update one or more supported fields in one minimal PUT and one readback:
 
@@ -261,10 +266,15 @@ clickup task start-date clear '<task-id>'
 Priority values are `urgent`, `high`, `normal`, `low`, or `clear`. A description file must be a
 regular UTF-8 file no larger than 1 MiB. Due and start dates accept `YYYY-MM-DD` or an ISO 8601
 timestamp with `Z` or an explicit offset. Date-only values use midnight in the selected timezone
-(UTC by default) for writes and local calendar dates for readback verification and display,
-including batch plan/apply; timed values remain exact UTC instants. Logical empty descriptions remain `""` in CLI, batch,
-and output contracts; task update serializes that clear request as ClickUp's required single space
-and accepts either empty or single-space cleared readback.
+(UTC by default) for writes and local calendar dates for readback verification, including batch
+plan/apply; timed values remain exact UTC instants. When ClickUp explicitly returns a false time
+flag, the CLI displays a local calendar date. ClickUp may instead omit the flag and normalize the
+stored timestamp (observed as `03:00Z` for a date-only due date); then the CLI preserves the ISO
+timestamp and null flag rather than guessing intent. Use the configured timezone with
+`due_date_ms`/`start_date_ms` when a local day is needed from an ambiguous response. Logical empty
+descriptions remain `""` in CLI, batch, and output contracts; task update serializes that clear
+request as ClickUp's required single space and accepts either empty or single-space cleared
+readback.
 
 Other idempotent and verified task mutations include:
 
