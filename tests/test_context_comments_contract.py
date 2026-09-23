@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from typer.testing import CliRunner, Result
 
@@ -47,6 +49,48 @@ def task(**fields: Any) -> dict[str, Any]:
 
 def expect_task(api: MockClickUpAPI, **fields: Any) -> None:
     api.expect("GET", f"/api/v2/task/{TASK}", headers=READ, response_json=task(**fields))
+
+
+def test_context_date_only_respects_global_timezone(mock_api: MockClickUpAPI) -> None:
+    local_midnight = datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Zurich"))
+    expect_task(
+        mock_api,
+        due_date=str(int(local_midnight.timestamp() * 1000)),
+        due_date_time=False,
+    )
+    mock_api.expect(
+        "GET",
+        "/api/v2/list/list_1",
+        headers=READ,
+        response_json={
+            "id": "list_1",
+            "name": "Inbox",
+            "space": {"id": "space_1", "name": "Build"},
+            "statuses": [{"status": "Open", "type": "open"}],
+        },
+    )
+    mock_api.expect(
+        "GET",
+        f"/api/v2/task/{TASK}/comment",
+        headers=READ,
+        response_json={"comments": []},
+    )
+    result = runner.invoke(
+        app,
+        [
+            "--base-url",
+            mock_api.base_url,
+            "--json",
+            "--timezone",
+            "Europe/Zurich",
+            "task",
+            "context",
+            TASK,
+        ],
+        env={"CLICKUP_API_TOKEN": TOKEN},
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["result"]["task"]["due_date"] == "2026-07-01"
 
 
 def comment(

@@ -830,7 +830,7 @@ def task_context(
         task_id = parse_task_ref(task_ref)
         return _with_client(
             state,
-            lambda client: TaskContextService(client).get(
+            lambda client: TaskContextService(client, timezone=state.timezone).get(
                 task_id, comments=comments, attachments=attachments
             ),
         )

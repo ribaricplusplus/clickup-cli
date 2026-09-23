@@ -5,6 +5,20 @@ Changelog, and the project intends to use Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+- Token-free named profiles selecting an env file and IANA timezone, with explicit CLI and
+  environment overrides; `tzdata` supports configured zones on systems without a native database.
+- UTF-8 `--description-file` for task create/ensure and bounded `task context` with list path,
+  valid statuses, recent comments, attachments, and explicit pagination completeness.
+- Native task-comment mentions by exact workspace member and revision-guarded rich comment edits.
+
+### Changed
+- Date-only due/start dates, task output, due filters, and batch planning honor the selected local
+  timezone while timed timestamps retain their absolute meaning; UTC remains the default.
+- Task creation verifies formatting-equivalent ClickUp description readbacks without mistaking
+  stripped trailing whitespace for failure, while preserving a known task ID on real mismatches.
+- Comment writes expose uncertain and known-ID partial outcomes instead of inviting blind retries.
+
 ## [0.2.0] - 2026-08-18
 
 ### Added

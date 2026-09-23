@@ -5,11 +5,13 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
-def test_changelog_has_empty_unreleased_and_dated_release() -> None:
+def test_changelog_records_unreleased_features_after_dated_release() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     unreleased = changelog.split("## [Unreleased]", 1)[1].split("## [0.2.0]", 1)[0]
 
-    assert unreleased.strip() == ""
+    assert "Token-free named profiles" in unreleased
+    assert "`task context`" in unreleased
+    assert "Native task-comment mentions" in unreleased
     assert "## [0.2.0] - 2026-08-18" in changelog
 
 

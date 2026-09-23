@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import cast
+from zoneinfo import ZoneInfo
 
 from clickup_cli.attachments import normalize_attachments
 from clickup_cli.client import ClickUpClient
@@ -63,8 +64,9 @@ def _comment_cursor(comment: JsonObject) -> JsonObject | None:
 class TaskContextService:
     """Never traverses whole workspaces or fetches more than bounded comment pages."""
 
-    def __init__(self, client: ClickUpClient) -> None:
+    def __init__(self, client: ClickUpClient, *, timezone: ZoneInfo | None = None) -> None:
         self._client = client
+        self._timezone = timezone or ZoneInfo("UTC")
 
     def get(self, task_id: str, *, comments: int = 10, attachments: int = 10) -> JsonObject:
         comments = _limit(comments, "comments")
@@ -125,7 +127,7 @@ class TaskContextService:
                 seen.add(key)
         folder = listing.get("folder_name")
         space = listing.get("space_name")
-        task_summary = summarize_task(task)
+        task_summary = summarize_task(task, timezone=self._timezone)
         task_summary["attachments"] = cast(list[JsonValue], all_attachments[:attachments])
         return {
             "task": task_summary,
