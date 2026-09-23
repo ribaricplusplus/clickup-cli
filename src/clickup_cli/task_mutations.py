@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from clickup_cli.client import ClickUpClient
 from clickup_cli.errors import (
@@ -33,6 +34,7 @@ class StartDateInput:
     milliseconds: int
     display: str
     has_time: bool
+    timezone: ZoneInfo = field(default_factory=lambda: ZoneInfo("UTC"))
 
 
 @dataclass(frozen=True)
@@ -81,7 +83,7 @@ def _normalized_timestamp_ms(value: datetime) -> tuple[datetime, int]:
     return normalized, milliseconds
 
 
-def parse_start_date(value: str) -> StartDateInput:
+def parse_start_date(value: str, *, timezone: ZoneInfo | None = None) -> StartDateInput:
     """Parse a date-only value or timezone-aware ISO timestamp as a start date."""
 
     requested = value.strip()
@@ -92,11 +94,13 @@ def parse_start_date(value: str) -> StartDateInput:
             raise InvalidStartDateError(
                 "Start date must be YYYY-MM-DD or an ISO 8601 timestamp with Z or an offset"
             ) from exc
-        parsed = datetime.combine(parsed_date, datetime.min.time(), tzinfo=UTC)
+        parsed = datetime.combine(parsed_date, datetime.min.time(), tzinfo=timezone or UTC)
         _, milliseconds = _normalized_timestamp_ms(parsed)
         if milliseconds < 0:
             raise InvalidStartDateError("Start date must not be before 1970-01-01")
-        return StartDateInput(milliseconds, parsed_date.isoformat(), False)
+        return StartDateInput(
+            milliseconds, parsed_date.isoformat(), False, timezone or ZoneInfo("UTC")
+        )
 
     if _TIMED_DATE.fullmatch(requested) is None:
         raise InvalidStartDateError(
@@ -120,13 +124,18 @@ def parse_start_date(value: str) -> StartDateInput:
     return StartDateInput(milliseconds, display, True)
 
 
-def _timestamp_from_ms(milliseconds: int, *, has_time: bool | None) -> str:
+def _timestamp_from_ms(
+    milliseconds: int, *, has_time: bool | None, timezone: ZoneInfo | None = None
+) -> str:
     try:
         parsed = _EPOCH + timedelta(milliseconds=milliseconds)
     except OverflowError as exc:
         raise APIError("ClickUp response contains an out-of-range start date") from exc
     if has_time is False:
-        return parsed.date().isoformat()
+        try:
+            return parsed.astimezone(timezone or UTC).date().isoformat()
+        except (OverflowError, ValueError) as exc:
+            raise APIError("ClickUp response contains an out-of-range start date") from exc
     timespec = "milliseconds" if parsed.microsecond else "seconds"
     return parsed.isoformat(timespec=timespec).replace("+00:00", "Z")
 
@@ -150,10 +159,10 @@ def task_start_date(task: JsonObject) -> StartDateState:
     return StartDateState(milliseconds, has_time)
 
 
-def start_date_display(state: StartDateState) -> str | None:
+def start_date_display(state: StartDateState, *, timezone: ZoneInfo | None = None) -> str | None:
     if state.milliseconds is None:
         return None
-    return _timestamp_from_ms(state.milliseconds, has_time=state.has_time)
+    return _timestamp_from_ms(state.milliseconds, has_time=state.has_time, timezone=timezone)
 
 
 def parse_priority(value: str) -> int | None:
@@ -253,7 +262,10 @@ def _task_tags(task: JsonObject) -> list[str]:
 def _date_value_matches(state: StartDateState, requested: StartDateInput) -> bool:
     same_value = state.milliseconds == requested.milliseconds
     if not requested.has_time and state.milliseconds is not None:
-        same_value = _timestamp_from_ms(state.milliseconds, has_time=False) == requested.display
+        same_value = (
+            _timestamp_from_ms(state.milliseconds, has_time=False, timezone=requested.timezone)
+            == requested.display
+        )
     return same_value
 
 
@@ -332,7 +344,7 @@ class TaskMutationService:
                     raise VerificationError("Start date verification failed: date was not cleared")
             elif request.start_date is not None and not _same_date(observed, request.start_date):
                 if not _date_value_matches(observed, request.start_date):
-                    received = start_date_display(observed)
+                    received = start_date_display(observed, timezone=request.start_date.timezone)
                     raise VerificationError(
                         "Start date verification failed: expected "
                         f"{request.start_date.display}, received {received}"

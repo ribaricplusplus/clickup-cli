@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
   "httpx>=0.28.1,<1",
   "typer>=0.26.0,<0.27",
+  "tzdata>=2025.2",
 ]
 
 [project.urls]

@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import NoReturn, TypeVar, cast
+from zoneinfo import ZoneInfo
 
 import typer
 from typer._click.exceptions import ClickException
@@ -27,7 +28,7 @@ from clickup_cli.batch import (
     load_manifest,
 )
 from clickup_cli.client import ClickUpClient
-from clickup_cli.config import DEFAULT_ENV_FILE, resolve_base_url, resolve_token
+from clickup_cli.config import resolve_base_url, resolve_settings, resolve_token
 from clickup_cli.discovery import (
     DEFAULT_TASK_LIMIT,
     MAX_TASK_RESULTS,
@@ -118,6 +119,7 @@ class AppState:
     base_url: str
     env_file: Path
     json_output: bool
+    timezone: ZoneInfo = field(default_factory=lambda: ZoneInfo("UTC"))
 
     def client(self) -> ClickUpClient:
         return ClickUpClient(token=resolve_token(self.env_file), base_url=self.base_url)
@@ -134,7 +136,7 @@ def _emit_json(payload: JsonObject, *, error: bool = False) -> None:
     typer.echo(json.dumps(payload, sort_keys=True, separators=(",", ":")), err=error)
 
 
-def _fail(state: AppState, error: ClickUpCLIError) -> None:
+def _fail(state: AppState, error: ClickUpCLIError) -> NoReturn:
     if state.json_output:
         error_payload: JsonObject = {"message": str(error), "type": error.error_type}
         error_payload.update(error.details)
@@ -238,11 +240,11 @@ def _comment_json(result: CommentMutationResult) -> JsonObject:
     return {"comment": result.comment, "task_id": result.task_id}
 
 
-def _task_update_json(result: TaskUpdateResult) -> JsonObject:
+def _task_update_json(result: TaskUpdateResult, *, timezone: ZoneInfo | None = None) -> JsonObject:
     return {
         "changed": result.changed,
         "fields": cast(list[JsonValue], result.fields),
-        "task": summarize_task(result.task),
+        "task": summarize_task(result.task, timezone=timezone),
         "task_id": result.task_id,
     }
 
@@ -351,24 +353,29 @@ def configure(
         help="Override CLICKUP_API_BASE_URL.",
         metavar="URL",
     ),
-    env_file: Path = typer.Option(
-        DEFAULT_ENV_FILE,
+    env_file: Path | None = typer.Option(
+        None,
         "--env-file",
         help="Dotenv file used after CLICKUP_API_TOKEN.",
         metavar="PATH",
     ),
+    profile: str | None = typer.Option(None, "--profile", metavar="NAME"),
+    timezone: str | None = typer.Option(None, "--timezone", metavar="IANA"),
 ) -> None:
     """Configure output and direct API access."""
 
     try:
         resolved_base_url = resolve_base_url(base_url)
+        settings = resolve_settings(profile, env_file, timezone)
     except ClickUpCLIError as exc:
-        provisional = AppState(base_url="", env_file=env_file, json_output=json_output)
+        provisional = AppState(base_url="", env_file=env_file or Path("."), json_output=json_output)
         _fail(provisional, exc)
+
     context.obj = AppState(
         base_url=resolved_base_url,
-        env_file=env_file,
+        env_file=settings.env_file,
         json_output=json_output,
+        timezone=settings.timezone,
     )
 
 
@@ -416,7 +423,10 @@ def list_workspaces(context: typer.Context) -> None:
     state = _state(context)
     _execute(
         state,
-        lambda: _with_client(state, lambda client: DiscoveryService(client).list_workspaces()),
+        lambda: _with_client(
+            state,
+            lambda client: DiscoveryService(client, timezone=state.timezone).list_workspaces(),
+        ),
         json_result=lambda workspaces: {"workspaces": cast(list[JsonValue], workspaces)},
         text_result=lambda workspaces: _catalog_text(workspaces, empty="No workspaces"),
     )
@@ -464,7 +474,7 @@ def workspace_tree(
         state,
         lambda: _with_client(
             state,
-            lambda client: DiscoveryService(client).workspace_tree(
+            lambda client: DiscoveryService(client, timezone=state.timezone).workspace_tree(
                 workspace_id, include_archived=include_archived
             ),
         ),
@@ -496,7 +506,10 @@ def list_members(
     _execute(
         state,
         lambda: _with_client(
-            state, lambda client: DiscoveryService(client).list_members(workspace_id)
+            state,
+            lambda client: DiscoveryService(client, timezone=state.timezone).list_members(
+                workspace_id
+            ),
         ),
         json_result=lambda members: {
             "members": cast(list[JsonValue], members),
@@ -528,7 +541,10 @@ def show_list(
 
     _execute(
         state,
-        lambda: _with_client(state, lambda client: DiscoveryService(client).show_list(list_id)),
+        lambda: _with_client(
+            state,
+            lambda client: DiscoveryService(client, timezone=state.timezone).show_list(list_id),
+        ),
         json_result=lambda item: {"list": item},
         text_result=text,
     )
@@ -552,7 +568,10 @@ def list_list_statuses(
 
     _execute(
         state,
-        lambda: _with_client(state, lambda client: DiscoveryService(client).list_statuses(list_id)),
+        lambda: _with_client(
+            state,
+            lambda client: DiscoveryService(client, timezone=state.timezone).list_statuses(list_id),
+        ),
         json_result=lambda statuses: {
             "list_id": list_id,
             "statuses": cast(list[JsonValue], statuses),
@@ -652,7 +671,10 @@ def list_tasks(
             limit=limit,
             all_results=all_results,
         )
-        return _with_client(state, lambda client: DiscoveryService(client).list_tasks(query))
+        return _with_client(
+            state,
+            lambda client: DiscoveryService(client, timezone=state.timezone).list_tasks(query),
+        )
 
     _execute(
         state,
@@ -714,7 +736,7 @@ def search_tasks(
         )
         return _with_client(
             state,
-            lambda client: DiscoveryService(client).search_tasks(
+            lambda client: DiscoveryService(client, timezone=state.timezone).search_tasks(
                 task_query,
                 query_text,
                 exact_name=exact_name,
@@ -743,6 +765,7 @@ def ensure_task(
     name: str = typer.Argument(..., metavar="NAME"),
     list_id: str = typer.Option(..., "--list-id", metavar="LIST_ID"),
     description: str | None = typer.Option(None, "--description"),
+    description_file: Path | None = typer.Option(None, "--description-file", metavar="PATH"),
     status: str | None = typer.Option(None, "--status"),
     assignees: list[int] | None = typer.Option(None, "--assignee", metavar="USER_ID"),
     due_at: str | None = typer.Option(
@@ -759,13 +782,20 @@ def ensure_task(
 
     def operation() -> EnsureResult:
         native_list_id = validate_native_id(list_id, label="LIST_ID")
-        requested_due_date = parse_due_date(due_at) if due_at is not None else None
+        if description is not None and description_file is not None:
+            raise InvalidOperationError("Use exactly one of --description and --description-file")
+        resolved_description = (
+            read_description_file(description_file) if description_file is not None else description
+        )
+        requested_due_date = (
+            parse_due_date(due_at, timezone=state.timezone) if due_at is not None else None
+        )
         return _with_client(
             state,
-            lambda client: DiscoveryService(client).ensure_task(
+            lambda client: DiscoveryService(client, timezone=state.timezone).ensure_task(
                 name,
                 native_list_id,
-                description=description,
+                description=resolved_description,
                 status=status,
                 assignees=assignees,
                 due_date=requested_due_date,
@@ -796,7 +826,7 @@ def show_task(
     def operation() -> JsonObject:
         task_id = parse_task_ref(task_ref)
         task = _with_client(state, lambda client: client.get_task(task_id))
-        return summarize_task(task)
+        return summarize_task(task, timezone=state.timezone)
 
     def text(task: JsonObject) -> str:
         raw_assignees = task.get("assignees")
@@ -844,8 +874,10 @@ def plan_task_batch(
     state = _state(context)
 
     def operation() -> JsonObject:
-        manifest = load_manifest(manifest_path)
-        return _with_client(state, lambda client: BatchService(client).plan(manifest))
+        manifest = load_manifest(manifest_path, timezone=state.timezone)
+        return _with_client(
+            state, lambda client: BatchService(client, timezone=state.timezone).plan(manifest)
+        )
 
     _execute(
         state,
@@ -873,10 +905,10 @@ def apply_task_batch(
     def operation() -> JsonObject:
         if not yes:
             raise ConfirmationError("Batch apply requires --yes")
-        manifest = load_manifest(manifest_path)
+        manifest = load_manifest(manifest_path, timezone=state.timezone)
         return _with_client(
             state,
-            lambda client: BatchService(client).apply(
+            lambda client: BatchService(client, timezone=state.timezone).apply(
                 manifest,
                 continue_on_error=continue_on_error,
             ),
@@ -1035,7 +1067,7 @@ def set_due_date(
 
     def operation() -> DueDateMutationResult:
         task_id = parse_task_ref(task_ref)
-        requested = parse_due_date(due_at)
+        requested = parse_due_date(due_at, timezone=state.timezone)
         return _with_client(
             state, lambda client: TaskService(client).set_due_date(task_id, requested)
         )
@@ -1116,7 +1148,11 @@ def update_task(
             read_description_file(description_file) if description_file is not None else description
         )
         resolved_priority = parse_priority(priority) if priority is not None else None
-        resolved_start_date = parse_start_date(start_date) if start_date is not None else None
+        resolved_start_date = (
+            parse_start_date(start_date, timezone=state.timezone)
+            if start_date is not None
+            else None
+        )
         request = TaskUpdateRequest(
             name=name,
             description=resolved_description,
@@ -1132,7 +1168,12 @@ def update_task(
             lambda client: TaskMutationService(client).update(task_id, request),
         )
 
-    _execute(state, operation, json_result=_task_update_json, text_result=_task_update_text)
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: _task_update_json(result, timezone=state.timezone),
+        text_result=_task_update_text,
+    )
 
 
 @priority_app.command("clear")
@@ -1151,7 +1192,12 @@ def clear_priority(
             lambda client: TaskMutationService(client).clear_priority(task_id),
         )
 
-    _execute(state, operation, json_result=_task_update_json, text_result=_task_update_text)
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: _task_update_json(result, timezone=state.timezone),
+        text_result=_task_update_text,
+    )
 
 
 @start_date_app.command("clear")
@@ -1170,7 +1216,12 @@ def clear_start_date(
             lambda client: TaskMutationService(client).clear_start_date(task_id),
         )
 
-    _execute(state, operation, json_result=_task_update_json, text_result=_task_update_text)
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: _task_update_json(result, timezone=state.timezone),
+        text_result=_task_update_text,
+    )
 
 
 def _set_archived(context: typer.Context, task_ref: str, *, archived: bool) -> None:
@@ -1183,7 +1234,12 @@ def _set_archived(context: typer.Context, task_ref: str, *, archived: bool) -> N
             lambda client: TaskMutationService(client).set_archived(task_id, archived=archived),
         )
 
-    _execute(state, operation, json_result=_task_update_json, text_result=_task_update_text)
+    _execute(
+        state,
+        operation,
+        json_result=lambda result: _task_update_json(result, timezone=state.timezone),
+        text_result=_task_update_text,
+    )
 
 
 @task_app.command("archive")
@@ -1353,6 +1409,7 @@ def create_task(
     name: str = typer.Argument(..., metavar="NAME"),
     list_id: str = typer.Option(..., "--list-id", metavar="LIST_ID"),
     description: str | None = typer.Option(None, "--description"),
+    description_file: Path | None = typer.Option(None, "--description-file", metavar="PATH"),
     status: str | None = typer.Option(None, "--status"),
     assignees: list[int] | None = typer.Option(None, "--assignee", metavar="USER_ID"),
     due_at: str | None = typer.Option(
@@ -1370,7 +1427,14 @@ def create_task(
 
     def operation() -> JsonObject:
         native_list_id = validate_native_id(list_id, label="LIST_ID")
-        requested_due_date = parse_due_date(due_at) if due_at is not None else None
+        if description is not None and description_file is not None:
+            raise InvalidOperationError("Use exactly one of --description and --description-file")
+        resolved_description = (
+            read_description_file(description_file) if description_file is not None else description
+        )
+        requested_due_date = (
+            parse_due_date(due_at, timezone=state.timezone) if due_at is not None else None
+        )
         requested_attachments = list(attachments or [])
         for path in requested_attachments:
             validate_attachment_file(path)
@@ -1380,7 +1444,7 @@ def create_task(
                 task = TaskService(client).create_task(
                     native_list_id,
                     name,
-                    description=description,
+                    description=resolved_description,
                     status=status,
                     assignees=assignees,
                     due_date=requested_due_date,
@@ -1433,7 +1497,14 @@ def create_task(
             return task
 
         task = _with_client(state, create_and_upload)
-        return summarize_task(task)
+        try:
+            return summarize_task(task, timezone=state.timezone)
+        except ClickUpCLIError as exc:
+            raise CreatedButUnverifiedError(
+                "Task was created but local date normalization failed; inspect it before retrying: "
+                + str(exc),
+                details={"task_id": str(task["id"])},
+            ) from exc
 
     _execute(
         state,

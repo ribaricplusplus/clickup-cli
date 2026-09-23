@@ -8,6 +8,7 @@ import stat
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
+from zoneinfo import ZoneInfo
 
 from clickup_cli.client import ClickUpClient
 from clickup_cli.domain import (
@@ -188,7 +189,9 @@ def _assignees(value: object, *, label: str, line: int) -> tuple[int, ...]:
     return tuple(normalized)
 
 
-def _set_operation(field: str, value: object, *, line: int) -> BatchOperation:
+def _set_operation(
+    field: str, value: object, *, line: int, timezone: ZoneInfo | None = None
+) -> BatchOperation:
     if field == "name":
         return BatchOperation("set_name", _string(value, label="set.name", line=line))
     if field == "description":
@@ -203,7 +206,7 @@ def _set_operation(field: str, value: object, *, line: int) -> BatchOperation:
             return BatchOperation("set_due_date", None)
         raw_due_date = _string(value, label="set.due_date", line=line)
         try:
-            return BatchOperation("set_due_date", parse_due_date(raw_due_date))
+            return BatchOperation("set_due_date", parse_due_date(raw_due_date, timezone=timezone))
         except ClickUpCLIError as exc:
             raise _manifest_error(str(exc), line=line) from exc
     if field == "priority":
@@ -224,7 +227,9 @@ def _set_operation(field: str, value: object, *, line: int) -> BatchOperation:
             return BatchOperation("set_start_date", None)
         raw_start_date = _string(value, label="set.start_date", line=line)
         try:
-            return BatchOperation("set_start_date", parse_start_date(raw_start_date))
+            return BatchOperation(
+                "set_start_date", parse_start_date(raw_start_date, timezone=timezone)
+            )
         except ClickUpCLIError as exc:
             raise _manifest_error(str(exc), line=line) from exc
     if field == "archived":
@@ -234,7 +239,7 @@ def _set_operation(field: str, value: object, *, line: int) -> BatchOperation:
     raise RuntimeError(f"Unhandled batch field: {field}")
 
 
-def _parse_task(payload: object, *, line: int) -> BatchTask:
+def _parse_task(payload: object, *, line: int, timezone: ZoneInfo | None = None) -> BatchTask:
     if not isinstance(payload, dict):
         raise _manifest_error("each nonblank line must be a JSON object", line=line)
     typed_payload = cast(dict[str, object], payload)
@@ -287,22 +292,24 @@ def _parse_task(payload: object, *, line: int) -> BatchTask:
 
     operations: list[BatchOperation] = []
     if set_payload.get("archived") is False:
-        operations.append(_set_operation("archived", False, line=line))
+        operations.append(_set_operation("archived", False, line=line, timezone=timezone))
     for field in _SET_ORDER:
         if field in set_payload:
-            operations.append(_set_operation(field, set_payload[field], line=line))
+            operations.append(
+                _set_operation(field, set_payload[field], line=line, timezone=timezone)
+            )
     operations.extend(BatchOperation("remove_tag", tag) for tag in remove_tags)
     operations.extend(BatchOperation("add_tag", tag) for tag in add_tags)
     operations.extend(BatchOperation("remove_assignee", user_id) for user_id in remove_assignees)
     operations.extend(BatchOperation("add_assignee", user_id) for user_id in add_assignees)
     if set_payload.get("archived") is True:
-        operations.append(_set_operation("archived", True, line=line))
+        operations.append(_set_operation("archived", True, line=line, timezone=timezone))
     if not operations:
         raise _manifest_error("task has no operations", line=line)
     return BatchTask(line=line, task_id=task_id, operations=tuple(operations))
 
 
-def load_manifest(path: Path) -> BatchManifest:
+def load_manifest(path: Path, *, timezone: ZoneInfo | None = None) -> BatchManifest:
     """Read, hash, parse, and strictly validate one bounded UTF-8 JSONL manifest."""
 
     try:
@@ -349,7 +356,7 @@ def load_manifest(path: Path) -> BatchManifest:
             )
         except (json.JSONDecodeError, _DuplicateJSONKey, ValueError, RecursionError) as exc:
             raise _manifest_error(f"malformed JSON ({exc})", line=line_number) from exc
-        task = _parse_task(payload, line=line_number)
+        task = _parse_task(payload, line=line_number, timezone=timezone)
         previous_line = task_lines.get(task.task_id)
         if previous_line is not None:
             raise _manifest_error(
@@ -397,8 +404,10 @@ def _display_value(operation: BatchOperation) -> JsonValue:
     return cast(JsonValue, value)
 
 
-def _initial_state(task: JsonObject, operations: list[BatchOperation]) -> dict[str, JsonValue]:
-    summary = summarize_task(task)
+def _initial_state(
+    task: JsonObject, operations: list[BatchOperation], *, timezone: ZoneInfo | None = None
+) -> dict[str, JsonValue]:
+    summary = summarize_task(task, timezone=timezone)
     kinds = {operation.kind for operation in operations}
     if "set_description" in kinds:
         description = task.get("description")
@@ -606,14 +615,15 @@ def _batch_space_tag_names(
 class BatchService:
     """Perform a complete read-only preflight before optional verified writes."""
 
-    def __init__(self, client: ClickUpClient) -> None:
+    def __init__(self, client: ClickUpClient, *, timezone: ZoneInfo | None = None) -> None:
         self._client = client
+        self._timezone = timezone
 
     def _preflight(self, manifest: BatchManifest) -> _Preflight:
         fetched: list[tuple[BatchTask, JsonObject, str]] = []
         for entry in manifest.tasks:
             task = self._client.get_task(entry.task_id)
-            summary = summarize_task(task)
+            summary = summarize_task(task, timezone=self._timezone)
             observed_id = summary.get("id")
             if observed_id != entry.task_id:
                 raise APIError(
@@ -731,7 +741,7 @@ class BatchService:
                 operations[index] = replace(operation, value=canonical)
                 tag_state.append(canonical)
             resolved_entry = replace(entry, operations=tuple(operations))
-            state = _initial_state(task, operations)
+            state = _initial_state(task, operations, timezone=self._timezone)
             changes = tuple(_planned_change(state, operation) for operation in operations)
             preflight_tasks.append(
                 _PreflightTask(
@@ -837,8 +847,8 @@ class BatchService:
             "task_id": task.entry.task_id,
         }
 
-    @staticmethod
     def _partial_task_result(
+        self,
         task: _PreflightTask,
         operations: list[JsonObject],
         last_verified: JsonObject,
@@ -847,7 +857,7 @@ class BatchService:
         return {
             "change_count": change_count,
             "completed_operation_count": len(operations),
-            "last_verified_task": summarize_task(last_verified),
+            "last_verified_task": summarize_task(last_verified, timezone=self._timezone),
             "line": task.entry.line,
             "no_op_count": len(operations) - change_count,
             "operation_count": len(task.entry.operations),
@@ -909,7 +919,7 @@ class BatchService:
             results.append(
                 {
                     "change_count": change_count,
-                    "final_task": summarize_task(last_verified),
+                    "final_task": summarize_task(last_verified, timezone=self._timezone),
                     "line": task.entry.line,
                     "no_op_count": len(operation_results) - change_count,
                     "operation_count": len(operation_results),

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import cast
+from zoneinfo import ZoneInfo
 
 from clickup_cli.client import ClickUpClient
 from clickup_cli.domain import (
@@ -22,6 +23,8 @@ from clickup_cli.domain import (
 from clickup_cli.errors import (
     AmbiguousMatchError,
     APIError,
+    ClickUpCLIError,
+    CreatedButUnverifiedError,
     InvalidOperationError,
     ResourceNotFoundError,
 )
@@ -311,9 +314,11 @@ class DiscoveryService:
         client: ClickUpClient,
         *,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        timezone: ZoneInfo | None = None,
     ) -> None:
         self._client = client
         self._now = now
+        self._timezone = timezone or ZoneInfo("UTC")
 
     def list_workspaces(self) -> list[JsonObject]:
         workspaces: list[JsonObject] = [
@@ -502,13 +507,18 @@ class DiscoveryService:
     def _due_bounds(self, due: DueFilter | None) -> tuple[int | None, int | None]:
         if due is None or due.kind == "none":
             return None, None
-        now = self._now().astimezone(UTC)
-        start = datetime.combine(now.date(), datetime.min.time(), tzinfo=UTC)
+        now = self._now().astimezone(self._timezone)
+        start = datetime.combine(now.date(), datetime.min.time(), tzinfo=self._timezone)
         start_ms = int(start.timestamp() * 1_000)
         if due.kind == "overdue":
             return None, start_ms
         days = 1 if due.kind == "today" else cast(int, due.days)
-        end_ms = int((start + timedelta(days=days)).timestamp() * 1_000)
+        end_ms = int(
+            datetime.combine(
+                now.date() + timedelta(days=days), datetime.min.time(), tzinfo=self._timezone
+            ).timestamp()
+            * 1_000
+        )
         return start_ms, end_ms
 
     def _server_parameters(
@@ -686,7 +696,7 @@ class DiscoveryService:
 
     def list_tasks(self, query: TaskQuery) -> list[JsonObject]:
         tasks = [
-            summarize_task(task)
+            summarize_task(task, timezone=self._timezone)
             for task in self._collect_tasks(query, deep=False, include_markdown=False)
         ]
         return tasks if query.limit is None else tasks[: query.limit]
@@ -707,7 +717,7 @@ class DiscoveryService:
             for task in self._collect_tasks(query, deep=deep, include_markdown=not exact_name)
             if _matches_search(task, needle, exact_name=exact_name)
         ]
-        summaries = [summarize_task(task) for task in matches]
+        summaries = [summarize_task(task, timezone=self._timezone) for task in matches]
         return summaries if query.limit is None else summaries[: query.limit]
 
     def ensure_task(
@@ -774,7 +784,15 @@ class DiscoveryService:
             due_date=due_date,
             tags=normalized_tags,
         )
-        return EnsureResult(created=True, task=summarize_task(created))
+        try:
+            summary = summarize_task(created, timezone=self._timezone)
+        except ClickUpCLIError as exc:
+            raise CreatedButUnverifiedError(
+                "Task was created but local date normalization failed; inspect it before retrying: "
+                + str(exc),
+                details={"task_id": str(created["id"])},
+            ) from exc
+        return EnsureResult(created=True, task=summary)
 
 
 def _task_id(task: JsonObject) -> str:

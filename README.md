@@ -35,9 +35,30 @@ export CLICKUP_API_TOKEN='<personal-token>'
 ```
 
 If the variable is absent, the CLI reads dotenv syntax from `~/.config/clickup-cli/env`. Select a
-different file with global `--env-file PATH`; the process environment always wins. The parser
-treats the file as data and does not execute or interpolate shell syntax. There is intentionally no
-`--token` option, keeping tokens out of command histories and process listings.
+different file with global `--env-file PATH` or `CLICKUP_ENV_FILE`; the process token always wins.
+The parser treats the file as data and does not execute or interpolate shell syntax. There is
+intentionally no `--token` option, keeping tokens out of command histories and process listings.
+
+Optional `~/.config/clickup-cli/config.toml` contains **no secrets**. Profiles select only an env
+file and an IANA timezone (relative env-file paths resolve against the config directory):
+
+```toml
+default_profile = "work"
+
+[profiles.work]
+env_file = "work.env"
+timezone = "Europe/Zurich"
+
+[profiles.personal]
+env_file = "personal.env"
+timezone = "America/New_York"
+```
+
+Select with global `--profile NAME` or `CLICKUP_PROFILE`. The precedence for each setting is
+CLI option > environment (`CLICKUP_ENV_FILE`, `CLICKUP_TIMEZONE`, `CLICKUP_PROFILE`) > selected
+profile > legacy defaults (env file above; UTC timezone). `CLICKUP_API_TOKEN` in the process
+always outranks the selected env file. Malformed config, unknown profiles, and invalid IANA
+timezones fail before network access. Keep tokens only in process environment or private env files.
 
 Direct requests default to `https://api.clickup.com/api`. `CLICKUP_API_BASE_URL` changes that root,
 and global `--base-url URL` takes precedence. A custom base ends at the API root; the client adds
@@ -53,12 +74,13 @@ Global options appear before a command group:
 ```console
 clickup --json task show '<task-id>'
 clickup --env-file ./private.env auth whoami
+clickup --profile work --timezone Europe/Zurich task show '<task-id>'
 clickup --base-url https://example.invalid/api workspace list
 clickup --version
 ```
 
-`--json` emits a stable envelope. `--env-file`, `--base-url`, and `--version` are the other global
-options.
+`--json` emits a stable envelope. `--env-file`, `--profile`, `--timezone`, `--base-url`, and
+`--version` are the other global options.
 
 ## Command map
 
@@ -113,7 +135,8 @@ clickup task search 'Exact task name' --folder-id '<folder-id>' --exact-name --d
 ```
 
 `--assignee`, `--status`, `--tag`, and `--exclude-tag` are repeatable. Due filters are `today`,
-`overdue`, `none`, or `next:Nd`. `--include-closed`, `--include-subtasks`, and
+`overdue`, `none`, or `next:Nd` in the selected timezone, including DST-length days.
+`--include-closed`, `--include-subtasks`, and
 `--include-archived` expand the default result set. Search matches names and descriptions
 case-insensitively; `--exact-name` restricts it to a normalized exact name. `--deep` enumerates
 Lists instead of relying on a Workspace-wide endpoint, which is useful when description coverage
@@ -133,6 +156,8 @@ https://app.clickup.com/t/<workspace-id>/<task-id>
 ```console
 clickup task ensure 'Investigate timeout' --list-id '<list-id>' \
   --description 'Capture a minimal reproduction' --tag focus
+clickup task ensure 'Investigate timeout' --list-id '<list-id>' \
+  --description-file ./brief.md
 ```
 
 It searches that List for a case-insensitive exact task name, including closed tasks and subtasks
@@ -147,12 +172,17 @@ existing Workspace tags, and repeated attachments:
 ```console
 clickup task create 'Investigate timeout' --list-id '<list-id>' \
   --description 'Reproduce first' --status Open --assignee 101 --tag focus
+clickup task create 'Review brief' --list-id '<list-id>' --description-file ./brief.md
 clickup task create 'Collect evidence' --list-id '<list-id>' \
   --due-date 2030-01-02T15:04:05Z --attach ./trace.txt --attach ./screenshot.png
 ```
 
+`--description-file PATH` and `--description TEXT` are mutually exclusive for create and ensure.
+Files must be regular UTF-8 files no larger than 1 MiB; they are read before the create POST.
 The create POST contains only supplied task fields. A separate task read verifies the ID, List,
-name, and all supplied supported fields before success. Attachments are validated before the task
+name, and all supplied supported fields before success. Description readback permits stripped
+trailing padding and narrow Markdown-equivalent bullet/escaping changes, but not missing links
+or truncated content. Attachments are validated before the task
 POST, uploaded serially only after task verification, and verified by returned ID and title on a
 fresh task read.
 
@@ -201,8 +231,9 @@ clickup task start-date clear '<task-id>'
 
 Priority values are `urgent`, `high`, `normal`, `low`, or `clear`. A description file must be a
 regular UTF-8 file no larger than 1 MiB. Due and start dates accept `YYYY-MM-DD` or an ISO 8601
-timestamp with `Z` or an explicit offset. Date-only values preserve date semantics; timed values
-are normalized to an exact UTC instant. Logical empty descriptions remain `""` in CLI, batch,
+timestamp with `Z` or an explicit offset. Date-only values use midnight in the selected timezone
+(UTC by default) for writes and local calendar dates for readback verification and display,
+including batch plan/apply; timed values remain exact UTC instants. Logical empty descriptions remain `""` in CLI, batch,
 and output contracts; task update serializes that clear request as ClickUp's required single space
 and accepts either empty or single-space cleared readback.
 

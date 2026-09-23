@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
+from zoneinfo import ZoneInfo
 
 from clickup_cli.attachments import normalize_attachments
 from clickup_cli.client import ClickUpClient
@@ -41,6 +42,26 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MAX_COMMENT_PAGES = 1_000
 
 
+def _equivalent_description(value: str) -> str:
+    """Normalize only safe Markdown presentation variants, retaining links and content."""
+
+    normalized = value.replace("\r\n", "\n").rstrip()
+    lines = normalized.split("\n")
+    in_fence = False
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence or "`" in line:
+            continue
+        # Both bullet markers render as an unordered-list item. Do not alter prose.
+        line = re.sub(r"^( {0,3})[*-](?=\s)", r"\1-", line)
+        # A backslash before a dot between alphanumerics has no Markdown effect.
+        line = re.sub(r"(?<=[A-Za-z0-9])\\\.(?=[A-Za-z0-9])", ".", line)
+        lines[index] = line
+    return "\n".join(lines)
+
+
 @dataclass(frozen=True)
 class StatusDefinition:
     label: str
@@ -61,6 +82,7 @@ class DueDateInput:
     milliseconds: int
     display: str
     has_time: bool
+    timezone: ZoneInfo = field(default_factory=lambda: ZoneInfo("UTC"))
 
 
 @dataclass(frozen=True)
@@ -122,10 +144,15 @@ def _normalized_timestamp_ms(value: datetime) -> tuple[datetime, int]:
     return normalized, milliseconds
 
 
-def _utc_date_from_ms(milliseconds: int) -> str:
+def _utc_date_from_ms(milliseconds: int, *, timezone: ZoneInfo | None = None) -> str:
     try:
-        return (_EPOCH + timedelta(milliseconds=milliseconds)).date().isoformat()
-    except OverflowError as exc:
+        return (
+            (_EPOCH + timedelta(milliseconds=milliseconds))
+            .astimezone(timezone or UTC)
+            .date()
+            .isoformat()
+        )
+    except (OverflowError, ValueError) as exc:
         raise APIError("ClickUp response contains an out-of-range due date") from exc
 
 
@@ -138,7 +165,7 @@ def _utc_datetime_from_ms(milliseconds: int) -> str:
     return parsed.isoformat(timespec=timespec).replace("+00:00", "Z")
 
 
-def parse_due_date(value: str) -> DueDateInput:
+def parse_due_date(value: str, *, timezone: ZoneInfo | None = None) -> DueDateInput:
     """Parse a date-only value or a timezone-aware ISO 8601 timestamp."""
 
     requested = value.strip()
@@ -149,7 +176,7 @@ def parse_due_date(value: str) -> DueDateInput:
             raise InvalidDueDateError(
                 "Due date must be YYYY-MM-DD or an ISO 8601 timestamp with Z or an offset"
             ) from exc
-        parsed = datetime.combine(parsed_date, datetime.min.time(), tzinfo=UTC)
+        parsed = datetime.combine(parsed_date, datetime.min.time(), tzinfo=timezone or UTC)
         _, milliseconds = _normalized_timestamp_ms(parsed)
         if milliseconds < 0:
             raise InvalidDueDateError("Due date must not be before 1970-01-01")
@@ -157,6 +184,7 @@ def parse_due_date(value: str) -> DueDateInput:
             milliseconds=milliseconds,
             display=parsed_date.isoformat(),
             has_time=False,
+            timezone=timezone or ZoneInfo("UTC"),
         )
 
     if _TIMED_DATE.fullmatch(requested) is None:
@@ -282,7 +310,7 @@ def list_statuses(list_payload: JsonObject) -> list[StatusDefinition]:
     return statuses
 
 
-def summarize_task(task: JsonObject) -> JsonObject:
+def summarize_task(task: JsonObject, *, timezone: ZoneInfo | None = None) -> JsonObject:
     """Produce the stable task shape used by machine-readable CLI output."""
 
     status_payload = task.get("status")
@@ -343,7 +371,7 @@ def summarize_task(task: JsonObject) -> JsonObject:
     due_date_display: JsonValue = None
     if due_date.milliseconds is not None:
         if due_date.has_time is False:
-            due_date_display = _utc_date_from_ms(due_date.milliseconds)
+            due_date_display = _utc_date_from_ms(due_date.milliseconds, timezone=timezone)
         else:
             due_date_display = _utc_datetime_from_ms(due_date.milliseconds)
 
@@ -370,7 +398,7 @@ def summarize_task(task: JsonObject) -> JsonObject:
         "list_name": list_name,
         "name": str(raw_name) if isinstance(raw_name, str) else None,
         "priority": priority_display(task),
-        "start_date": start_date_display(start_date),
+        "start_date": start_date_display(start_date, timezone=timezone),
         "start_date_ms": start_date.milliseconds,
         "start_date_time": start_date.has_time,
         "status": status_label,
@@ -445,10 +473,13 @@ class TaskService:
     def _verify_due_date_state(requested: DueDateInput, observed: DueDateState) -> None:
         value_matches = observed.milliseconds == requested.milliseconds
         if not requested.has_time and observed.milliseconds is not None:
-            value_matches = _utc_date_from_ms(observed.milliseconds) == requested.display
+            value_matches = (
+                _utc_date_from_ms(observed.milliseconds, timezone=requested.timezone)
+                == requested.display
+            )
         if not value_matches:
             received = (
-                _utc_date_from_ms(observed.milliseconds)
+                _utc_date_from_ms(observed.milliseconds, timezone=requested.timezone)
                 if not requested.has_time and observed.milliseconds is not None
                 else observed.milliseconds
             )
@@ -483,7 +514,11 @@ class TaskService:
         observed_name = _required_string(readback.get("name"), label="created task name")
         if observed_name != name:
             raise VerificationError(f"expected name {name!r}, received {observed_name!r}")
-        if description is not None and readback.get("description") != description:
+        if description is not None and (
+            not isinstance(readback.get("description"), str)
+            or _equivalent_description(cast(str, readback["description"]))
+            != _equivalent_description(description)
+        ):
             raise VerificationError("description did not match")
         if status is not None:
             observed_status = task_status(readback)
@@ -725,7 +760,10 @@ class TaskService:
         previous = task_due_date(task)
         same_value = previous.milliseconds == requested.milliseconds
         if not requested.has_time and previous.milliseconds is not None:
-            same_value = _utc_date_from_ms(previous.milliseconds) == requested.display
+            same_value = (
+                _utc_date_from_ms(previous.milliseconds, timezone=requested.timezone)
+                == requested.display
+            )
         if same_value and previous.has_time == requested.has_time:
             return DueDateMutationResult(
                 task_id=task_id,
@@ -746,10 +784,13 @@ class TaskService:
         observed = task_due_date(readback)
         value_matches = observed.milliseconds == requested.milliseconds
         if not requested.has_time and observed.milliseconds is not None:
-            value_matches = _utc_date_from_ms(observed.milliseconds) == requested.display
+            value_matches = (
+                _utc_date_from_ms(observed.milliseconds, timezone=requested.timezone)
+                == requested.display
+            )
         if not value_matches:
             received = (
-                _utc_date_from_ms(observed.milliseconds)
+                _utc_date_from_ms(observed.milliseconds, timezone=requested.timezone)
                 if not requested.has_time and observed.milliseconds is not None
                 else observed.milliseconds
             )
