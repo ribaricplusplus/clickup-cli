@@ -43,7 +43,68 @@ Direct API requests carry `Accept: application/json` and the raw personal token 
 that content type on otherwise empty bodies where ClickUp's contract expects it. Multipart upload
 uses one `attachment` part. The separate attachment downloader sends no authorization header.
 
-API version construction is private to `ClickUpClient`; the supported direct endpoints are v2.
+API version construction is private to `ClickUpClient`; tasks and prior operations remain v2,
+while the supported public Docs endpoints use v3 per operation.
+
+## Public Docs v3 provenance and contracts
+
+The eight public Docs operation references were inspected on 2026-10-06 using the official
+Markdown references listed by <https://developer.clickup.com/llms.txt>. They embed OpenAPI 3.0.0,
+API title `ClickUp Public API v3`, and the literal API info version `version` (not a numeric release).
+Each operation page embeds one path; shared paths carry distinct GET/POST/PUT operations. The
+reference pages inspected here declare `updatedAt: 2026-07-01T21:23:16.000Z`. No new combined/raw
+OpenAPI snapshot is vendored or assigned a speculative checksum; the existing v2 snapshot above
+and its checksum are unchanged.
+
+- <https://developer.clickup.com/reference/searchdocspublic.md>
+- <https://developer.clickup.com/reference/createdocpublic.md>
+- <https://developer.clickup.com/reference/getdocpublic.md>
+- <https://developer.clickup.com/reference/getdocpagelistingpublic.md>
+- <https://developer.clickup.com/reference/getdocpagespublic.md>
+- <https://developer.clickup.com/reference/createpagepublic.md>
+- <https://developer.clickup.com/reference/getpagepublic.md>
+- <https://developer.clickup.com/reference/editpagepublic.md>
+- Limitations: <https://developer.clickup.com/docs/docsimportexportlimitations.md>
+
+All paths below are under `/api/v3/workspaces/{workspace_id}/docs`:
+
+| Operation | Wire contract |
+| --- | --- |
+| List accessible Docs | GET collection with deleted/archived, optional creator/parent filters, limit 10-100, opaque cursor; object response `{docs,next_cursor}` |
+| Create Doc | POST collection with name, explicit visibility PRIVATE/PUBLIC/PERSONAL/HIDDEN, explicit create_page boolean, optional parent `{id,type}` |
+| Doc metadata | GET `/{doc_id}`; literal ID/workspace/name/public and supplied parent verify create |
+| Recursive page references | GET `/{doc_id}/page_listing?max_page_depth=-1`; root ARRAY with nested `pages` children |
+| Full snapshot pages | GET `/{doc_id}/pages?max_page_depth=-1&content_format=text%2Fmd`; nested root ARRAY with full content |
+| Create page | POST `/{doc_id}/pages` with name/content/explicit content_format and only supplied parent_page_id/sub_title |
+| Exact page read | GET `/{doc_id}/pages/{page_id}?content_format=text%2Fmd` or `text%2Fplain` |
+| Metadata page edit | PUT exact page path, name and optional sub_title ONLY |
+| Content page edit | PUT exact page path, content, explicit content_format and content_edit_mode append/prepend/replace ONLY |
+
+Parent type numeric values are SPACE=4, FOLDER=5, LIST=6, EVERYTHING=7, WORKSPACE=12. The list
+request uses `cursor`, never the deprecated request `next_cursor`. The provider documents no text
+query parameter; title/body search is local and bounded. Content search uses one recursive pages
+request per Doc instead of one request per page. Missing, null, and empty-string `next_cursor`
+values mark terminal traversal, as confirmed by live reads. Arrays count all descendants, validate
+parent/Doc/workspace consistency, and reject duplicate/cyclic identity. API access errors are not
+successful no-match. Missing provider timestamps stay null.
+
+Page PUT success may have an empty/non-JSON 200 body; a separate exact GET verifies intended
+content/metadata. Creates retain a returned ID before all subsequent verification/normalization.
+Doc POST, page POST, and every page PUT opt out of automatic retries. Native additions are
+non-idempotent despite PUT. A dispatched transport failure or unusable success is unknown;
+known created IDs and completed edits with failed verification have typed no-retry partial outcomes.
+Content verification permits CRLF and terminal newline normalization. Live native append/prepend
+also add one- or two-newline Markdown block separators at the join; verification accepts those
+specific boundary forms while keeping both blocks' internal contents exact. Whole-content replace
+requires explicit loss acknowledgement and same-format full raw-content hash. No documented
+If-Match/revision condition exists: this guard is preflight, not atomic CAS.
+
+The GET Doc contract exposes public but not complete visibility/create-page intent. The CLI
+explicitly sends those fields while limiting independent verification claims. The endpoint set has
+no public Docs delete/archive, Doc rename, or page move operation; these commands are not invented.
+Snapshots retain full text and per-file/original-content hashes with authorized source URLs, but
+cannot reconstruct unsupported rich blocks, synced content, embeds, views, comments, or styling.
+No attachments/internal links are fetched. No live account IDs/content are included in fixtures.
 
 ## Discovery and task-read contracts
 

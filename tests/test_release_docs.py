@@ -5,13 +5,15 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
-def test_changelog_records_unreleased_features_after_dated_release() -> None:
+def test_changelog_records_docs_release_and_keeps_previous_feature_history() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog.split("## [Unreleased]", 1)[1].split("## [0.2.0]", 1)[0]
+    unreleased = changelog.split("## [0.3.0] - 2026-10-06", 1)[1].split("## [0.2.0]", 1)[0]
 
     assert "Token-free named profiles" in unreleased
     assert "`task context`" in unreleased
     assert "Native task-comment mentions" in unreleased
+    assert "ClickUp Docs" in unreleased
+    assert "text snapshots" in unreleased
     assert "## [0.2.0] - 2026-08-18" in changelog
 
 
@@ -41,6 +43,8 @@ def test_readme_documents_all_command_groups_and_stable_task_fields() -> None:
         "`task attachment`",
         "`task batch`",
         "`time`",
+        "`doc`",
+        "`doc page`",
     )
     stable_fields = (
         "archived",

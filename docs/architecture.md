@@ -10,7 +10,9 @@ Typer CLI adapter
   |-- TaskMutationService --- fields, tags, archive state
   |-- AttachmentService ----- upload/list/download
   |-- BatchService ---------- strict preflight and serial composition
-  `-- TimeTrackingService --- time reads and verified mutations
+  |-- TimeTrackingService --- time reads and verified mutations
+  |-- DocsService ----------- scoped retrieval and verified authoring
+  `-- DocSnapshotService ---- private staged text snapshots
                     |
               ClickUpClient
                     |
@@ -21,7 +23,7 @@ Typer CLI adapter
 
 ### HTTP and configuration
 
-`clickup_cli.client.ClickUpClient` owns raw personal-token authorization, internal v2 path
+`clickup_cli.client.ClickUpClient` owns raw personal-token authorization, internal per-operation v2/v3 path
 construction, headers, encoded queries and tag paths, multipart upload, bounded timeouts, bounded
 429 retries, response validation, and token redaction. It exposes only endpoint methods needed by
 the product. Task, hierarchy, Workspace, List, time-entry, and attachment-upload IDs are validated
@@ -34,6 +36,36 @@ failures stop before credential resolution or network access.
 
 `clickup_cli.refs` validates native IDs and supported ClickUp task URLs before an ID can enter an
 HTTP path. It extracts a comment ID only from a validated task deep link.
+
+`clickup_cli.doc_refs` independently resolves explicit workspace/Doc/page context and validated
+ClickUp Docs URLs, rejects conflicts before HTTP, preserves literal IDs, and builds exact source
+page links. It never infers workspace identity from an ID prefix or changes task reference policy.
+
+### Public Docs and text snapshots
+
+`clickup_cli.docs.DocsService` composes v3 client methods. Doc listing is bounded cursor traversal;
+recursive page arrays are flattened iteratively with identity/parent/duplicate/cycle validation and
+full breadcrumbs. Local Unicode title/body search requires explicit Doc or Workspace scope and
+reports scan/output completeness. Page reads retain original content hashes and nullable provider
+times; display strips inline data images and bounds actual escaped JSON, with line/column continuation.
+No display truncation is reused as authoring input or full snapshot content.
+
+Creates explicitly serialize visibility, initial-page intent, and supported supplied fields. Page
+metadata edits never send content. Native append/prepend never replace exported rich pages. Full
+replacement requires loss acknowledgement and a current hash preflight, explicitly not atomic CAS.
+Ensure only exact-matches NFC-normalized sibling names; it leaves an existing page unchanged and
+does not promise atomic uniqueness. Fresh GETs verify writes, and all Docs writes disable automatic
+retry independently of HTTP method. Known IDs survive post-write readback/normalization failures.
+GET's public boolean does not establish complete personal/hidden visibility semantics.
+
+`clickup_cli.doc_export.DocSnapshotService` uses full recursive authorized page content and a
+hierarchy/hash manifest, without following links or downloading attachments. Page-ID filenames
+avoid Unicode-title/path/collision hazards. Existing destinations and symlink components are
+refused; no-follow directory handles pin paths, a private stage holds mode-0600 files, and Linux
+renameat2 NOREPLACE installs the mode-0700 directory atomically without overwriting raced targets.
+HTTP/filesystem failures remove the stage. JSON preserves the equivalent original content with
+separate file/content hashes. This is a lossy public-API text snapshot, not a point-in-time or
+full-fidelity backup. The thin `docs_cli` adapter is registered under the existing root/output envelope.
 
 ### Stable task and discovery semantics
 

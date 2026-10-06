@@ -1,8 +1,9 @@
 # clickup-cli
 
 `clickup-cli` provides deterministic ClickUp operations for people, scripts, and agents. Version
-0.2.0 covers hierarchy discovery, bounded task search and ensure, attachments, verified task
-mutations and lifecycle changes, strict batch manifests, and time tracking. The distribution is
+0.3.0 adds first-class ClickUp Docs retrieval, verified authoring, and private Markdown/JSON text
+snapshots to hierarchy discovery, task operations, attachments, batch manifests, and time tracking.
+The distribution is
 named `clickup-agent-cli`; the equivalent installed commands are `clickup` and `cu`.
 
 The project favors exact requests, bounded traversal, stable JSON, explicit confirmation, and
@@ -101,9 +102,150 @@ The root groups and their current responsibilities are:
 | `task attachment` | `list`, `upload`, `download` |
 | `task batch` | `plan`, `apply` |
 | `time` | `current`, `list`, `start`, `stop`, `add`, `update`, `delete` |
+| `doc` | `list`, `show`, `pages`, `search`, `create`, `export` |
+| `doc page` | `show`, `create`, `update`, `append`, `prepend`, `replace`, `ensure` |
 
 Use a group's `--help` for the complete Typer syntax. The sections below explain the behavior and
 the options that affect safety or selection.
+
+## ClickUp Docs
+
+Docs use the public v3 API internally; existing task operations remain v2. Reads are live, with no
+cache. Only authorized Docs/pages are accessed. Bare Doc IDs require an explicit numeric
+`--workspace-id`; bare page IDs also require `--doc`. No workspace is inferred from an ID prefix.
+Supported reference forms (all IDs below are synthetic) are:
+
+```text
+https://app.clickup.com/123/docs/d-1
+https://app.clickup.com/123/v/dc/d-1
+https://app.clickup.com/123/v/dc/d-1/p-1
+```
+
+URL/flag conflicts, path injection, deceptive hosts, userinfo, non-HTTPS URLs, and unrecognized
+query/fragment forms are rejected before HTTP. In particular, query `page-id` links are not yet
+supported; use a literal page ID with explicit Doc/workspace context instead. Source links preserve
+literal authorized IDs and point to the exact page, not a guessed workspace.
+
+### Retrieval and local search
+
+```console
+clickup doc list --workspace-id 123 --all --limit 100
+clickup doc list --workspace-id 123 --archived --creator 42 --parent-id 987 --parent-type LIST
+clickup doc show 'https://app.clickup.com/123/docs/d-1'
+clickup doc pages d-1 --workspace-id 123 --tree --all
+clickup doc search 'Procedure' --doc d-1 --workspace-id 123
+clickup doc search 'STRASSE' --doc d-1 --workspace-id 123 --content --max-pages 100
+clickup doc search 'Procedure' --workspace-id 123 --max-docs 10 --max-pages 100
+clickup doc page show 'https://app.clickup.com/123/v/dc/d-1/p-1' --format markdown
+clickup --json doc page show p-1 --doc d-1 --workspace-id 123 --format plain --offset 0 --limit 20
+```
+
+Doc listing supports `--archived`, `--deleted`, `--creator`, and paired `--parent-id`/`--parent-type`
+(SPACE, FOLDER, LIST, EVERYTHING, WORKSPACE). It follows opaque `next_cursor` using the documented
+`cursor` request parameter only with `--all`, never displaying cursor values. Repeated cursors fail
+closed. A missing, null, or empty-string `next_cursor` marks the verified end of traversal.
+API page sizes are 10-100 even when the requested result limit is smaller.
+
+Page listing requests all recursive descendants, validates identities/parents, and represents every
+returned node with parent ID, depth, full breadcrumb, and source URL. Tree rendering does not hide
+nested pages or bypass output bounds. All descendants count toward the limit; duplicate/cyclic or
+inconsistent hierarchies are errors, not silent deduplication. Hierarchies are capped at 10,000
+pages and 128 levels. `total` is the observed recursive count, not the number of roots.
+
+Search is **local page-title search** by default; `--content` fetches recursive page bodies with one
+bulk request per Doc, avoiding a request per page, then applies Unicode `casefold` matching.
+There is no invented provider full-text query parameter. A Doc or
+explicit Workspace scope is mandatory. Workspace search discovers accessible Docs and shares one
+page-scan ceiling across them. Inaccessible pages fail the command rather than yielding a successful
+no-match. Matches include bounded snippets, 1-based source line ranges for body matches, and exact
+deep links. Text not returned by ClickUp's export API is not evidence that it is absent in the UI.
+
+Defaults: at most 50 results, 50 searched pages, 10 searched Docs, and one Doc-list cursor request.
+`--all` follows Doc cursors (at most 100 requests) and raises unspecified ceilings to 1,000 results/
+searched pages and 100 searched Docs. Explicit `--limit`, `--max-pages`, and `--max-docs` still win.
+Console collection payloads also have a 48,000-byte JSON budget; `complete`, `has_more`,
+`returned_count`, warnings, and nullable totals distinguish complete from partial output/search.
+Use full export rather than treating a console ceiling as an exhaustive snapshot.
+
+Page `show` offsets are 0-based **lines**. `--limit` defaults to 100 lines, maximum 1,000. Console
+body output is additionally capped at 16,000 characters and 48,000 escaped JSON bytes. A long line
+returns `next_offset` and `next_column`; resume with both `--offset` and `--column`, retaining the
+same content format. JSON includes literal workspace/doc/page IDs, name, parent, breadcrumb, URL,
+nullable provider timestamps, `retrieved_at`, full original-content `sha256`, line continuation,
+counts, and export warnings. Inline `data:image` blobs are replaced only for display by a clear
+marker with `omitted_data_images`; ordinary image URLs remain. The hash covers full untruncated
+provider text, including inline images. Oversized metadata fails safely rather than flooding output.
+
+### Safe authoring
+
+```console
+clickup doc create 'Handbook' --workspace-id 123
+clickup doc create 'Shared handbook' --workspace-id 123 --visibility public --create-page
+clickup doc create 'List handbook' --workspace-id 123 --parent-id 987 --parent-type LIST
+clickup doc page create d-1 --workspace-id 123 --name 'Overview' --content-file ./overview.md
+clickup doc page create d-1 --workspace-id 123 --name 'Child' --parent-page p-1 \
+  --content-file ./child.md --sub-title 'Notes'
+clickup doc page update p-1 --doc d-1 --workspace-id 123 --name 'Renamed' --sub-title 'New subtitle'
+clickup doc page append p-1 --doc d-1 --workspace-id 123 --content-file ./addition.md
+clickup doc page prepend p-1 --doc d-1 --workspace-id 123 --content-file ./introduction.md
+clickup doc page replace p-1 --doc d-1 --workspace-id 123 --content-file ./replacement.md \
+  --expect-sha256 '<full-sha256-from-same-format-read>' --acknowledge-loss
+clickup doc page ensure d-1 --workspace-id 123 --name 'Overview' --content-file ./overview.md
+```
+
+Doc create explicitly sends PRIVATE visibility and `create_page: false` by default, avoiding blank
+pages. Supported `--visibility` values are private, public, personal, hidden. GET verifies stable
+identity, name, public boolean, and any supplied parent. GET does not expose complete visibility or
+the create-page option: personal/hidden privacy semantics and initial-page intent are not independently
+verified; the result retains requested visibility and warnings rather than overclaiming.
+
+Page content files are regular UTF-8 files capped at 1 MiB, read before writing; stdin is not
+supported. `--format markdown|plain` explicitly serializes `text/md|text/plain`. Parent-page URLs
+must identify the same Doc/workspace. Metadata-only update never sends an empty content field.
+Append/prepend use native `content_edit_mode`, not read-export-and-replace. Content-only edits omit
+name/subtitle and verify those fields remained unchanged. Every successful create/edit has a separate
+GET readback; content verification normalizes CRLF and terminal newlines. Native append/prepend
+also accept the provider's one- or two-newline separator between imported blocks, without relaxing
+spaces, links, or internal Markdown structures.
+
+Whole-content replace requires both a current full SHA256 and `--acknowledge-loss` because exported
+text can lose rich blocks. A stale hash rejects before PUT. **This is preflight only, not atomic
+compare-and-swap**: another writer can edit between GET and PUT. Ensure NFC-normalizes/strips only
+outer whitespace from names and exact-matches siblings in the specified parent, preserving case.
+Zero matches create, one returns unchanged, multiple return structured ambiguity. It never reconciles
+content and is not concurrency-proof uniqueness.
+
+Doc/page creates and all page edits are never automatically retried, including native append/prepend
+PUTs. Ambiguous dispatched writes return `outcome_unknown`; known create IDs survive as
+`created_but_unverified`, and completed edits with failed readback are `edited_but_unverified`.
+Structured details retain known workspace/doc/page IDs and `retry_safe: false`; inspect before retrying.
+No unsupported Docs delete/archive, page move, Doc rename, ACL, or private API operation is offered.
+
+### Private text snapshot export
+
+```console
+clickup doc export d-1 --workspace-id 123 --format markdown --output ./handbook-snapshot
+clickup doc export 'https://app.clickup.com/123/docs/d-1' --format json --output ./handbook-json
+```
+
+Export fetches full recursive content, not console excerpts. `manifest.json` records Doc/page IDs,
+hierarchy, names, parent IDs, breadcrumbs, source URLs, nullable provider timestamps, retrieval time,
+filenames, original `content_sha256`, actual-byte `file_sha256`, warnings, and `text_snapshot` kind.
+Markdown files contain exact raw exported text; JSON files wrap equivalent full content and metadata,
+so their file/content hashes are intentionally distinct. Page-ID-based filenames prevent duplicate
+title collisions/path traversal; Unicode titles are retained in the manifest.
+
+This is **not a full-fidelity backup or guaranteed round-trip restore**. Embeds, synced content, views,
+comments, covers, styles, and some formatting are unavailable in the public text API. No internal links
+are followed and no attachments/images are downloaded. Reads across a Doc are not an atomic
+point-in-time revision.
+
+The parent directory must already exist and be user/root-owned, without group/world write permission.
+All path components are pinned with no-follow directory handles; symlink output/parents are refused.
+A private staged directory is installed atomically with Linux `renameat2` no-overwrite semantics;
+Linux is currently required for export. Existing targets are always rejected, including a raced target;
+there is no unsafe `--force`. Directories are mode 0700 and files 0600. HTTP/filesystem failure removes
+the hidden stage and installs no apparently complete snapshot. The full snapshot ceiling is 100 MiB.
 
 ## Hierarchy and task discovery
 

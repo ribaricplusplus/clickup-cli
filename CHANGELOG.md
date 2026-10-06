@@ -5,7 +5,18 @@ Changelog, and the project intends to use Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-06
+
 ### Added
+- First-class ClickUp Docs list/show, recursive pages and trees, explicitly scoped local Unicode
+  title/content search, and bounded Markdown/plain page reads with source links and full hashes.
+- Readback-verified private-by-default Doc creation, root/child page create/ensure, metadata-only
+  edits, native append/prepend, and loss-acknowledged preflight revision-guarded replacement.
+- Full recursive Markdown/JSON text snapshots with hierarchy manifests, content/file hashes,
+  private filesystem modes, safe Page-ID filenames, staged atomic no-overwrite installation,
+  and explicit public-API export limitations.
+- Localhost ordered v3 contracts for cursor/tree bounds, unsafe references, Unicode continuation,
+  access errors, uncertain writes and normalization failures, and snapshot failure/path safety.
 - Token-free named profiles selecting an env file and IANA timezone, with explicit CLI and
   environment overrides; `tzdata` supports configured zones on systems without a native database.
 - UTF-8 `--description-file` for task create/ensure and bounded `task context` with list path,
@@ -89,6 +100,7 @@ Changelog, and the project intends to use Semantic Versioning.
 - Localhost HTTP contract tests, a separately gated live sandbox test, API provenance docs, and
   Python 3.11-3.13 CI for formatting, linting, typing, tests, and builds.
 
-[Unreleased]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ribaricplusplus/clickup-cli/releases/tag/v0.1.0

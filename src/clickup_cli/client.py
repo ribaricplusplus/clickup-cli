@@ -62,8 +62,8 @@ class ClickUpClient:
         hostname = (urlsplit(self._base_url).hostname or "").casefold()
         return hostname in {"127.0.0.1", "::1", "localhost"}
 
-    def _url(self, path: str) -> str:
-        return f"{self._base_url}/v2{path}"
+    def _url(self, path: str, *, version: int = 2) -> str:
+        return f"{self._base_url}/v{version}{path}"
 
     @staticmethod
     def _query_path(path: str, parameters: Sequence[tuple[str, str | int]]) -> str:
@@ -104,6 +104,8 @@ class ClickUpClient:
         json_body: JsonObject | None = None,
         files: dict[str, tuple[str, BinaryIO, str]] | None = None,
         json_content_type: bool = False,
+        version: int = 2,
+        retry_safe: bool = True,
     ) -> httpx.Response:
         if json_body is not None and files is not None:
             raise InvalidOperationError("A request cannot contain JSON and multipart bodies")
@@ -112,12 +114,14 @@ class ClickUpClient:
             if json_body is not None or json_content_type
             else None
         )
-        retry_count = self._max_rate_limit_retries if method in {"GET", "PUT", "DELETE"} else 0
+        retry_count = (
+            self._max_rate_limit_retries if retry_safe and method in {"GET", "PUT", "DELETE"} else 0
+        )
         for attempt in range(retry_count + 1):
             try:
                 response = self._http.request(
                     method,
-                    self._url(path),
+                    self._url(path, version=version),
                     headers=headers,
                     json=json_body,
                     files=files,
@@ -157,12 +161,14 @@ class ClickUpClient:
         *,
         json_body: JsonObject | None = None,
         json_content_type: bool = False,
+        version: int = 2,
     ) -> JsonObject:
         response = self._request(
             method,
             path,
             json_body=json_body,
             json_content_type=json_content_type,
+            version=version,
         )
         status_code = response.status_code
         try:
@@ -177,6 +183,180 @@ class ClickUpClient:
 
     def get_user(self) -> JsonObject:
         return self._object_response("GET", "/user")
+
+    def list_docs(
+        self, workspace_id: str, parameters: Sequence[tuple[str, str | int]]
+    ) -> JsonObject:
+        from clickup_cli.doc_refs import doc_id, workspace
+
+        allowed = {
+            "id",
+            "creator",
+            "deleted",
+            "archived",
+            "parent_id",
+            "parent_type",
+            "limit",
+            "cursor",
+        }
+        seen: set[str] = set()
+        for key, value in parameters:
+            if key not in allowed or key in seen:
+                raise InvalidOperationError("Unsupported or repeated Docs query parameter")
+            seen.add(key)
+            if key == "limit" and (type(value) is not int or not 10 <= value <= 100):
+                raise InvalidOperationError("API Doc-list limit must be 10-100")
+            if key in {"deleted", "archived"} and value not in {"true", "false"}:
+                raise InvalidOperationError("Doc-list boolean filters must be true or false")
+            if key in {"id", "parent_id"}:
+                if not isinstance(value, str):
+                    raise InvalidOperationError("Doc-list ID filters must be literal strings")
+                doc_id(value)
+            if key == "creator":
+                workspace(str(value))
+            if key == "parent_type" and str(value) not in {
+                "4",
+                "5",
+                "6",
+                "7",
+                "12",
+                "SPACE",
+                "FOLDER",
+                "LIST",
+                "EVERYTHING",
+                "WORKSPACE",
+            }:
+                raise InvalidOperationError("Unsupported Doc-list parent type")
+            if key == "cursor" and (not isinstance(value, str) or not value or len(value) > 8192):
+                raise InvalidOperationError("Invalid or oversized Doc cursor")
+        return self._object_response(
+            "GET",
+            self._query_path(f"/workspaces/{workspace(workspace_id)}/docs", parameters),
+            version=3,
+        )
+
+    def get_doc_page_listing(self, workspace_id: str, doc_id: str) -> list[JsonObject]:
+        return self._doc_array(workspace_id, doc_id, content=False)
+
+    def get_doc_pages(self, workspace_id: str, doc_id: str) -> list[JsonObject]:
+        return self._doc_array(workspace_id, doc_id, content=True)
+
+    def _doc_array(self, workspace_id: str, doc_id: str, *, content: bool) -> list[JsonObject]:
+        from clickup_cli.doc_refs import doc_id as validate_doc_id
+        from clickup_cli.doc_refs import workspace
+
+        suffix = (
+            "pages?max_page_depth=-1&content_format=text%2Fmd"
+            if content
+            else "page_listing?max_page_depth=-1"
+        )
+        path = f"/workspaces/{workspace(workspace_id)}/docs/{validate_doc_id(doc_id)}/{suffix}"
+        response = self._request("GET", path, version=3)
+        try:
+            payload: Any = response.json()
+        except ValueError as exc:
+            raise APIError(
+                "ClickUp API returned invalid JSON", status_code=response.status_code
+            ) from exc
+        finally:
+            response.close()
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise APIError("ClickUp Docs API expected a root array")
+        return cast(list[JsonObject], payload)
+
+    def get_doc_page(
+        self, workspace_id: str, doc_id: str, page_id: str, *, content_format: str = "text/md"
+    ) -> JsonObject:
+        from clickup_cli.doc_refs import doc_id as validate_doc_id
+        from clickup_cli.doc_refs import workspace
+
+        if content_format not in {"text/md", "text/plain"}:
+            raise InvalidOperationError("Unsupported page content format")
+        path = (
+            f"/workspaces/{workspace(workspace_id)}/docs/{validate_doc_id(doc_id)}"
+            f"/pages/{validate_doc_id(page_id)}"
+        )
+        return self._object_response(
+            "GET", self._query_path(path, [("content_format", content_format)]), version=3
+        )
+
+    def create_doc(self, workspace_id: str, body: JsonObject) -> JsonObject:
+        from clickup_cli.doc_refs import doc_id, workspace
+
+        if (
+            set(body) - {"name", "visibility", "create_page", "parent"}
+            or not isinstance(body.get("name"), str)
+            or not str(body["name"]).strip()
+            or not isinstance(body.get("visibility"), str)
+            or body.get("visibility") not in {"PRIVATE", "PUBLIC", "PERSONAL", "HIDDEN"}
+            or not isinstance(body.get("create_page"), bool)
+        ):
+            raise InvalidOperationError("Invalid Doc create body")
+        parent = body.get("parent")
+        if parent is not None:
+            if not isinstance(parent, dict) or set(parent) != {"id", "type"}:
+                raise InvalidOperationError("Invalid Doc parent body")
+            identifier = parent["id"]
+            if (
+                not isinstance(identifier, str)
+                or type(parent["type"]) is not int
+                or parent["type"] not in {4, 5, 6, 7, 12}
+            ):
+                raise InvalidOperationError("Invalid Doc parent identity/type")
+            doc_id(identifier, "PARENT_ID")
+        return self._object_response(
+            "POST", f"/workspaces/{workspace(workspace_id)}/docs", json_body=body, version=3
+        )
+
+    def create_doc_page(self, workspace_id: str, doc_id: str, body: JsonObject) -> JsonObject:
+        from clickup_cli.doc_refs import doc_id as validate_doc_id
+        from clickup_cli.doc_refs import workspace
+
+        if (
+            set(body) - {"name", "content", "content_format", "parent_page_id", "sub_title"}
+            or not isinstance(body.get("name"), str)
+            or not str(body["name"]).strip()
+            or not isinstance(body.get("content"), str)
+            or body.get("content_format") not in {"text/md", "text/plain"}
+        ):
+            raise InvalidOperationError("Invalid page create body")
+        if "parent_page_id" in body:
+            validate_doc_id(str(body["parent_page_id"]), "PARENT_PAGE_ID")
+        path = f"/workspaces/{workspace(workspace_id)}/docs/{validate_doc_id(doc_id)}/pages"
+        return self._object_response("POST", path, json_body=body, version=3)
+
+    def edit_doc_page(self, workspace_id: str, doc_id: str, page_id: str, body: JsonObject) -> None:
+        from clickup_cli.doc_refs import doc_id as validate_doc_id
+        from clickup_cli.doc_refs import workspace
+
+        if (
+            not body
+            or set(body) - {"name", "sub_title", "content", "content_format", "content_edit_mode"}
+            or any(not isinstance(value, str) for value in body.values())
+        ):
+            raise InvalidOperationError("Invalid page edit body")
+        if "content" in body and (
+            body.get("content_format") not in {"text/md", "text/plain"}
+            or body.get("content_edit_mode") not in {"append", "prepend", "replace"}
+        ):
+            raise InvalidOperationError(
+                "Content edits require supported explicit format and edit mode"
+            )
+        if "content" not in body and {"content_format", "content_edit_mode"} & body.keys():
+            raise InvalidOperationError("Content options require content")
+        path = (
+            f"/workspaces/{workspace(workspace_id)}/docs/{validate_doc_id(doc_id)}"
+            f"/pages/{validate_doc_id(page_id)}"
+        )
+        response = self._request("PUT", path, json_body=body, version=3, retry_safe=False)
+        response.close()
+
+    def get_doc(self, workspace_id: str, doc_id: str) -> JsonObject:
+        from clickup_cli.doc_refs import doc_id as validate_doc_id
+        from clickup_cli.doc_refs import workspace
+
+        path = f"/workspaces/{workspace(workspace_id)}/docs/{validate_doc_id(doc_id)}"
+        return self._object_response("GET", path, version=3)
 
     def get_workspaces(self) -> JsonObject:
         return self._object_response("GET", "/team")

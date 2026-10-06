@@ -13,6 +13,11 @@ runner = CliRunner()
 @pytest.mark.parametrize(
     ("arguments", "message_fragment"),
     [
+        (["--json", "doc", "list"], "Missing option '--workspace-id'"),
+        (
+            ["--json", "doc", "page", "replace", "p-1", "--content-file", "body.md"],
+            "Missing option '--expect-sha256'",
+        ),
         (["--json", "task", "set-status", "task_123"], "Missing argument 'STATUS'"),
         (["--json", "task", "create", "Synthetic task"], "Missing option '--list-id'"),
         (

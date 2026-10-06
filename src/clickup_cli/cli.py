@@ -37,6 +37,7 @@ from clickup_cli.discovery import (
     EnsureResult,
     TaskQuery,
 )
+from clickup_cli.docs_cli import doc_app
 from clickup_cli.domain import (
     AssignmentMutationResult,
     CommentMutationResult,
@@ -104,6 +105,7 @@ app.add_typer(workspace_app, name="workspace")
 app.add_typer(member_app, name="member")
 app.add_typer(list_app, name="list")
 app.add_typer(time_app, name="time")
+app.add_typer(doc_app, name="doc")
 task_app.add_typer(comment_app, name="comment")
 task_app.add_typer(due_date_app, name="due-date")
 task_app.add_typer(attachment_app, name="attachment")
