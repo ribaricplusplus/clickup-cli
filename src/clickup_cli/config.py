@@ -10,7 +10,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from clickup_cli.errors import ConfigurationError
+from clickup_cli.descriptions import DescriptionFormat, validate_description_format
+from clickup_cli.errors import ConfigurationError, InvalidOperationError
 
 DEFAULT_API_BASE_URL = "https://api.clickup.com/api"
 DEFAULT_ENV_FILE = Path("~/.config/clickup-cli/env")
@@ -22,6 +23,7 @@ _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 class Settings:
     env_file: Path
     timezone: ZoneInfo
+    description_format: DescriptionFormat = "plain"
 
 
 def validate_timezone(value: str) -> ZoneInfo:
@@ -39,6 +41,7 @@ def resolve_settings(
     timezone: str | None,
     *,
     config_path: Path = DEFAULT_CONFIG_FILE,
+    description_format: str | None = None,
 ) -> Settings:
     """Resolve token-free profile settings with CLI > env > profile > defaults."""
 
@@ -55,13 +58,24 @@ def resolve_settings(
     if not isinstance(raw_profiles, dict):
         raise ConfigurationError("Config profiles must be a table")
     for name, entry in raw_profiles.items():
-        if not isinstance(entry, dict) or set(entry) - {"env_file", "timezone"}:
-            raise ConfigurationError(f"Profile {name!r} supports only env_file and timezone")
+        if not isinstance(entry, dict) or set(entry) - {
+            "env_file",
+            "timezone",
+            "description_format",
+        }:
+            raise ConfigurationError(
+                f"Profile {name!r} supports only env_file, timezone and description_format"
+            )
         for key, value in entry.items():
             if not isinstance(value, str) or not value.strip():
                 raise ConfigurationError(f"Profile {name!r} {key} must be nonempty text")
         if "timezone" in entry:
             validate_timezone(entry["timezone"])
+        if "description_format" in entry:
+            try:
+                validate_description_format(entry["description_format"])
+            except InvalidOperationError as exc:
+                raise ConfigurationError(str(exc)) from exc
     default_profile = config.get("default_profile")
     if default_profile is not None and (
         not isinstance(default_profile, str) or not default_profile.strip()
@@ -92,7 +106,21 @@ def resolve_settings(
         else os.environ.get("CLICKUP_TIMEZONE", entry.get("timezone", "UTC"))
     )
     assert isinstance(chosen_zone, str)
-    return Settings(env_file=chosen_env.expanduser(), timezone=validate_timezone(chosen_zone))
+    chosen_format = (
+        description_format
+        if description_format is not None
+        else os.environ.get("CLICKUP_DESCRIPTION_FORMAT", entry.get("description_format", "plain"))
+    )
+    assert isinstance(chosen_format, str)
+    try:
+        validated_format = validate_description_format(chosen_format)
+    except InvalidOperationError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    return Settings(
+        env_file=chosen_env.expanduser(),
+        timezone=validate_timezone(chosen_zone),
+        description_format=validated_format,
+    )
 
 
 def _quoted_value(value: str, quote: str, *, line_number: int) -> str:

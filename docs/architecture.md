@@ -69,6 +69,11 @@ full-fidelity backup. The thin `docs_cli` adapter is registered under the existi
 
 ### Stable task and discovery semantics
 
+`clickup_cli.descriptions` owns explicit plain/Markdown format validation and a typed CommonMark
+semantic comparison. It keeps structure, text, link URLs and code rather than unescaping exports.
+Task services choose a single description write field and request Markdown readback only when
+needed; configuration and the CLI select format without implicitly changing batch manifests.
+
 `clickup_cli.domain.TaskService` owns the original task semantics: stable task/comment
 normalization, due-date parsing, verified creation, exact comment lookup, assignee deltas,
 List-validated status changes, and semantic completion. Date parsing never depends on the host
@@ -87,7 +92,7 @@ new creation to `TaskService`.
 tag, and archive state. It compares requested state to a fresh task read, builds one body containing
 only changed fields, and verifies the operation-specific state afterward. Description files are
 bounded regular UTF-8 files. Logical empty descriptions serialize as a single space only at the
-task PUT boundary and normalize back to empty on read. Tag changes use separate safely encoded
+task write boundary and normalize back to empty on read. Tag changes use separate safely encoded
 endpoints and are idempotent.
 
 `clickup_cli.attachments.AttachmentService` normalizes attachments from authoritative task reads.

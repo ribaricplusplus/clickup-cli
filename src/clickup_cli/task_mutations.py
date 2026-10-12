@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from clickup_cli.client import ClickUpClient
+from clickup_cli.descriptions import markdown_matches, validate_description_format
 from clickup_cli.errors import (
     APIError,
     InvalidOperationError,
@@ -48,6 +49,7 @@ class TaskUpdateRequest:
     name: str | None = None
     description: str | None = None
     description_supplied: bool = False
+    description_format: str = "plain"
     priority: int | None = None
     priority_supplied: bool = False
     start_date: StartDateInput | None = None
@@ -61,6 +63,7 @@ class TaskUpdateResult:
     changed: bool
     fields: list[str]
     task: JsonObject
+    description_format: str | None = None
 
 
 @dataclass(frozen=True)
@@ -281,6 +284,7 @@ class TaskMutationService:
 
     @staticmethod
     def _validate_request(request: TaskUpdateRequest) -> None:
+        validate_description_format(request.description_format)
         if request.name is not None and not request.name.strip():
             raise InvalidOperationError("Task name cannot be empty")
         if request.description_supplied and request.description is None:
@@ -311,9 +315,16 @@ class TaskMutationService:
             if current_name != request.name:
                 fields["name"] = request.name
         if request.description_supplied:
-            current_description = logical_task_description(task.get("description"))
-            if current_description != request.description:
-                fields["description"] = request.description
+            if request.description_format == "markdown":
+                if not markdown_matches(
+                    request.description or "", task.get("markdown_description")
+                ):
+                    fields["markdown_content"] = request.description
+            else:
+                current_description = logical_task_description(task.get("description"))
+                requested_description = logical_task_description(request.description)
+                if current_description != requested_description:
+                    fields["description"] = requested_description
         if request.priority_supplied and task_priority(task) != request.priority:
             fields["priority"] = request.priority
         if request.start_date is not None:
@@ -328,12 +339,15 @@ class TaskMutationService:
 
     @staticmethod
     def _verify(readback: JsonObject, request: TaskUpdateRequest, fields: JsonObject) -> None:
+        if "markdown_content" in fields and not markdown_matches(
+            request.description or "", readback.get("markdown_description")
+        ):
+            raise VerificationError("Task Markdown description verification failed")
         if "name" in fields and readback.get("name") != request.name:
             raise VerificationError("Task name verification failed")
-        if (
-            "description" in fields
-            and logical_task_description(readback.get("description")) != request.description
-        ):
+        if "description" in fields and logical_task_description(
+            readback.get("description")
+        ) != logical_task_description(request.description):
             raise VerificationError("Task description verification failed")
         if "priority" in fields and task_priority(readback) != request.priority:
             raise VerificationError("Task priority verification failed")
@@ -363,14 +377,27 @@ class TaskMutationService:
 
     def update(self, task_id: str, request: TaskUpdateRequest) -> TaskUpdateResult:
         self._validate_request(request)
-        task = self._client.get_task(task_id)
+        markdown = request.description_supplied and request.description_format == "markdown"
+        result_format = "markdown" if markdown else None
+        task = (
+            self._client.get_task(task_id, include_markdown_description=True)
+            if markdown
+            else self._client.get_task(task_id)
+        )
         fields = self._changed_fields(task, request)
         if not fields:
-            return TaskUpdateResult(task_id, False, [], task)
+            return TaskUpdateResult(task_id, False, [], task, result_format)
         self._client.update_task(task_id, fields)
-        readback = self._client.get_task(task_id)
+        readback = (
+            self._client.get_task(task_id, include_markdown_description=True)
+            if markdown
+            else self._client.get_task(task_id)
+        )
         self._verify(readback, request, fields)
-        return TaskUpdateResult(task_id, True, sorted(fields), readback)
+        logical_fields = sorted(
+            "description" if key == "markdown_content" else key for key in fields
+        )
+        return TaskUpdateResult(task_id, True, logical_fields, readback, result_format)
 
     def set_archived(self, task_id: str, *, archived: bool) -> TaskUpdateResult:
         return self.update(task_id, TaskUpdateRequest(archived=archived))

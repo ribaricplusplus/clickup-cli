@@ -393,9 +393,12 @@ class ClickUpClient:
         )
         return self._object_response("GET", path)
 
-    def get_task(self, task_id: str) -> JsonObject:
+    def get_task(self, task_id: str, *, include_markdown_description: bool = False) -> JsonObject:
         task_id = validate_native_id(task_id, label="TASK_ID")
-        return self._object_response("GET", f"/task/{task_id}")
+        path = f"/task/{task_id}"
+        if include_markdown_description:
+            path += "?include_markdown_description=true"
+        return self._object_response("GET", path)
 
     def get_list(self, list_id: str) -> JsonObject:
         list_id = validate_native_id(list_id, label="LIST_ID")
@@ -444,9 +447,12 @@ class ClickUpClient:
         task_id = validate_native_id(task_id, label="TASK_ID")
         if not fields:
             raise InvalidOperationError("A task update must contain at least one field")
+        if "description" in fields and "markdown_content" in fields:
+            raise InvalidOperationError("Cannot send both description and markdown_content")
         supported_fields = {
             "archived",
             "description",
+            "markdown_content",
             "name",
             "priority",
             "start_date",
@@ -461,6 +467,8 @@ class ClickUpClient:
             raise InvalidOperationError("Task name must be non-empty text")
         if "description" in fields and not isinstance(fields["description"], str):
             raise InvalidOperationError("Task description must be text")
+        if "markdown_content" in fields and not isinstance(fields["markdown_content"], str):
+            raise InvalidOperationError("Task Markdown content must be text")
         if "priority" in fields:
             priority = fields["priority"]
             if priority is not None and (
@@ -487,8 +495,9 @@ class ClickUpClient:
         if "archived" in fields and not isinstance(fields["archived"], bool):
             raise InvalidOperationError("Task archived state must be boolean")
         wire_fields = dict(fields)
-        if wire_fields.get("description") == "":
-            wire_fields["description"] = " "
+        for key in ("description", "markdown_content"):
+            if wire_fields.get(key) == "":
+                wire_fields[key] = " "
         response = self._request("PUT", f"/task/{task_id}", json_body=wire_fields)
         response.close()
 
@@ -650,6 +659,7 @@ class ClickUpClient:
         name: str,
         *,
         description: str | None = None,
+        markdown_content: str | None = None,
         status: str | None = None,
         assignees: list[int] | None = None,
         due_date: int | None = None,
@@ -660,8 +670,14 @@ class ClickUpClient:
         if not isinstance(name, str) or not name.strip():
             raise InvalidOperationError("Task name cannot be empty")
         body: JsonObject = {"name": name}
+        if description is not None and markdown_content is not None:
+            raise InvalidOperationError("Cannot send both description and markdown_content")
         if description is not None:
-            body["description"] = description
+            body["description"] = " " if description == "" else description
+        if markdown_content is not None:
+            if not isinstance(markdown_content, str):
+                raise InvalidOperationError("Task Markdown content must be text")
+            body["markdown_content"] = " " if markdown_content == "" else markdown_content
         if status is not None:
             body["status"] = status
         if assignees:

@@ -71,3 +71,18 @@ def test_readme_documents_all_command_groups_and_stable_task_fields() -> None:
     assert all(group in readme for group in groups)
     stable_section = readme.split("Current stable task fields are:", 1)[1].split("## ", 1)[0]
     assert all(field in stable_section for field in stable_fields)
+
+
+def test_markdown_release_documents_wire_fields_defaults_and_verification() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    contracts = (ROOT / "docs" / "api-contracts.md").read_text(encoding="utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "0.3.1" in readme
+    assert "--description-format" in readme
+    assert "CLICKUP_DESCRIPTION_FORMAT" in readme
+    assert 'description_format = "markdown"' in readme
+    assert "markdown_content" in contracts
+    assert "include_markdown_description=true" in contracts
+    assert "CommonMark" in contracts
+    assert "## [0.3.1] - 2026-10-12" in changelog
+    assert "escaped headings" in changelog

@@ -30,6 +30,7 @@ from clickup_cli.batch import (
 from clickup_cli.client import ClickUpClient
 from clickup_cli.config import resolve_base_url, resolve_settings, resolve_token
 from clickup_cli.context_comments import RichCommentService, TaskContextService
+from clickup_cli.descriptions import validate_description_format
 from clickup_cli.discovery import (
     DEFAULT_TASK_LIMIT,
     MAX_TASK_RESULTS,
@@ -123,6 +124,7 @@ class AppState:
     env_file: Path
     json_output: bool
     timezone: ZoneInfo = field(default_factory=lambda: ZoneInfo("UTC"))
+    description_format: str = "plain"
 
     def client(self) -> ClickUpClient:
         return ClickUpClient(token=resolve_token(self.env_file), base_url=self.base_url)
@@ -247,7 +249,9 @@ def _task_update_json(result: TaskUpdateResult, *, timezone: ZoneInfo | None = N
     return {
         "changed": result.changed,
         "fields": cast(list[JsonValue], result.fields),
-        "task": summarize_task(result.task, timezone=timezone),
+        "task": summarize_task(
+            result.task, timezone=timezone, description_format=result.description_format
+        ),
         "task_id": result.task_id,
     }
 
@@ -379,6 +383,7 @@ def configure(
         env_file=settings.env_file,
         json_output=json_output,
         timezone=settings.timezone,
+        description_format=settings.description_format,
     )
 
 
@@ -770,6 +775,7 @@ def ensure_task(
     description: str | None = typer.Option(None, "--description"),
     description_file: Path | None = typer.Option(None, "--description-file", metavar="PATH"),
     status: str | None = typer.Option(None, "--status"),
+    description_format: str | None = typer.Option(None, "--description-format", metavar="FORMAT"),
     assignees: list[int] | None = typer.Option(None, "--assignee", metavar="USER_ID"),
     due_at: str | None = typer.Option(
         None,
@@ -784,6 +790,9 @@ def ensure_task(
     state = _state(context)
 
     def operation() -> EnsureResult:
+        resolved_format = validate_description_format(
+            description_format if description_format is not None else state.description_format
+        )
         native_list_id = validate_native_id(list_id, label="LIST_ID")
         if description is not None and description_file is not None:
             raise InvalidOperationError("Use exactly one of --description and --description-file")
@@ -799,6 +808,7 @@ def ensure_task(
                 name,
                 native_list_id,
                 description=resolved_description,
+                description_format=resolved_format,
                 status=status,
                 assignees=assignees,
                 due_date=requested_due_date,
@@ -868,7 +878,9 @@ def task_context(
 
 @task_app.command("show")
 def show_task(
-    context: typer.Context, task_ref: str = typer.Argument(..., metavar="TASK_REF")
+    context: typer.Context,
+    task_ref: str = typer.Argument(..., metavar="TASK_REF"),
+    description_format: str | None = typer.Option(None, "--description-format", metavar="FORMAT"),
 ) -> None:
     """Show a task in a stable normalized shape."""
 
@@ -876,8 +888,17 @@ def show_task(
 
     def operation() -> JsonObject:
         task_id = parse_task_ref(task_ref)
-        task = _with_client(state, lambda client: client.get_task(task_id))
-        return summarize_task(task, timezone=state.timezone)
+        resolved_format = validate_description_format(
+            description_format if description_format is not None else state.description_format
+        )
+        markdown = resolved_format == "markdown"
+        task = _with_client(
+            state,
+            lambda client: client.get_task(task_id, include_markdown_description=markdown),
+        )
+        return summarize_task(
+            task, timezone=state.timezone, description_format="markdown" if markdown else None
+        )
 
     def text(task: JsonObject) -> str:
         raw_assignees = task.get("assignees")
@@ -904,6 +925,11 @@ def show_task(
                 f"Tags: {', '.join(tag_labels)}",
                 f"Attachments: {len(cast(list[JsonValue], task.get('attachments') or []))}",
                 f"URL: {task.get('url') or ''}",
+                *(
+                    [f"Description (Markdown):\n{task.get('markdown_description') or ''}"]
+                    if task.get("description_format") == "markdown"
+                    else []
+                ),
             )
         )
 
@@ -1225,6 +1251,7 @@ def update_task(
     name: str | None = typer.Option(None, "--name", metavar="TEXT"),
     description: str | None = typer.Option(None, "--description", metavar="TEXT"),
     description_file: Path | None = typer.Option(None, "--description-file", metavar="PATH"),
+    description_format: str | None = typer.Option(None, "--description-format", metavar="FORMAT"),
     priority: str | None = typer.Option(None, "--priority", metavar="PRIORITY"),
     start_date: str | None = typer.Option(None, "--start-date", metavar="START_AT"),
     clear_start_date: bool = typer.Option(False, "--clear-start-date"),
@@ -1251,6 +1278,9 @@ def update_task(
             name=name,
             description=resolved_description,
             description_supplied=description is not None or description_file is not None,
+            description_format=validate_description_format(
+                description_format if description_format is not None else state.description_format
+            ),
             priority=resolved_priority,
             priority_supplied=priority is not None,
             start_date=resolved_start_date,
@@ -1504,6 +1534,7 @@ def create_task(
     list_id: str = typer.Option(..., "--list-id", metavar="LIST_ID"),
     description: str | None = typer.Option(None, "--description"),
     description_file: Path | None = typer.Option(None, "--description-file", metavar="PATH"),
+    description_format: str | None = typer.Option(None, "--description-format", metavar="FORMAT"),
     status: str | None = typer.Option(None, "--status"),
     assignees: list[int] | None = typer.Option(None, "--assignee", metavar="USER_ID"),
     due_at: str | None = typer.Option(
@@ -1530,6 +1561,9 @@ def create_task(
             parse_due_date(due_at, timezone=state.timezone) if due_at is not None else None
         )
         requested_attachments = list(attachments or [])
+        resolved_format = validate_description_format(
+            description_format if description_format is not None else state.description_format
+        )
         for path in requested_attachments:
             validate_attachment_file(path)
 
@@ -1539,6 +1573,7 @@ def create_task(
                     native_list_id,
                     name,
                     description=resolved_description,
+                    description_format=resolved_format,
                     status=status,
                     assignees=assignees,
                     due_date=requested_due_date,
@@ -1588,11 +1623,37 @@ def create_task(
                     raise RuntimeError("Verified attachment is missing its ID")
                 uploaded_ids.append(attachment_id)
                 task = upload.task
+            if (
+                requested_attachments
+                and resolved_format == "markdown"
+                and resolved_description is not None
+            ):
+                try:
+                    task = TaskService(client).verify_markdown_description(
+                        task_id, resolved_description
+                    )
+                except ClickUpCLIError as exc:
+                    raise CreatedButUnverifiedError(
+                        "Task was created but final Markdown readback after attachments failed; "
+                        "inspect it before retrying: " + str(exc),
+                        details={
+                            "task_id": task_id,
+                            "uploaded_attachment_ids": cast(list[JsonValue], uploaded_ids),
+                        },
+                    ) from exc
             return task
 
         task = _with_client(state, create_and_upload)
         try:
-            return summarize_task(task, timezone=state.timezone)
+            return summarize_task(
+                task,
+                timezone=state.timezone,
+                description_format=(
+                    "markdown"
+                    if resolved_format == "markdown" and resolved_description is not None
+                    else None
+                ),
+            )
         except ClickUpCLIError as exc:
             raise CreatedButUnverifiedError(
                 "Task was created but local date normalization failed; inspect it before retrying: "

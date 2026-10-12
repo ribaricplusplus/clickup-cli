@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from clickup_cli.attachments import normalize_attachments
 from clickup_cli.client import ClickUpClient
+from clickup_cli.descriptions import markdown_matches, validate_description_format
 from clickup_cli.errors import (
     APIError,
     ClickUpCLIError,
@@ -312,7 +313,12 @@ def list_statuses(list_payload: JsonObject) -> list[StatusDefinition]:
     return statuses
 
 
-def summarize_task(task: JsonObject, *, timezone: ZoneInfo | None = None) -> JsonObject:
+def summarize_task(
+    task: JsonObject,
+    *,
+    timezone: ZoneInfo | None = None,
+    description_format: str | None = None,
+) -> JsonObject:
     """Produce the stable task shape used by machine-readable CLI output."""
 
     status_payload = task.get("status")
@@ -392,6 +398,12 @@ def summarize_task(task: JsonObject, *, timezone: ZoneInfo | None = None) -> Jso
         "assignees": assignees,
         "attachments": cast(list[JsonValue], attachments),
         "description": logical_task_description(raw_description),
+        **(
+            {"markdown_description": logical_task_description(task.get("markdown_description"))}
+            if "markdown_description" in task
+            else {}
+        ),
+        **({"description_format": description_format} if description_format is not None else {}),
         "due_date": due_date_display,
         "due_date_ms": due_date.milliseconds,
         "due_date_time": due_date.has_time,
@@ -539,6 +551,7 @@ class TaskService:
         list_id: str,
         name: str,
         description: str | None,
+        description_format: str,
         status: str | None,
         assignees: list[int],
         due_date: DueDateInput | None,
@@ -553,12 +566,14 @@ class TaskService:
         observed_name = _required_string(readback.get("name"), label="created task name")
         if observed_name != name:
             raise VerificationError(f"expected name {name!r}, received {observed_name!r}")
-        if description is not None and (
-            not isinstance(readback.get("description"), str)
-            or _equivalent_description(cast(str, readback["description"]))
-            != _equivalent_description(description)
-        ):
-            raise VerificationError("description did not match")
+        if description is not None:
+            if description_format == "markdown":
+                if not markdown_matches(description, readback.get("markdown_description")):
+                    raise VerificationError("Markdown description did not match")
+            elif not isinstance(readback.get("description"), str) or _equivalent_description(
+                cast(str, readback["description"])
+            ) != _equivalent_description(description):
+                raise VerificationError("description did not match")
         if status is not None:
             observed_status = task_status(readback)
             if observed_status.casefold() != status.casefold():
@@ -584,11 +599,14 @@ class TaskService:
         name: str,
         *,
         description: str | None = None,
+        description_format: str = "plain",
         status: str | None = None,
         assignees: list[int] | None = None,
         due_date: DueDateInput | None = None,
         tags: list[str] | None = None,
     ) -> JsonObject:
+        validate_description_format(description_format)
+        markdown = description_format == "markdown" and description is not None
         normalized_name = name.strip()
         if not normalized_name:
             raise InvalidOperationError("Task name cannot be empty")
@@ -608,7 +626,8 @@ class TaskService:
             created = self._client.create_task(
                 list_id,
                 normalized_name,
-                description=description,
+                description=None if markdown else description,
+                markdown_content=description if markdown else None,
                 status=normalized_status,
                 assignees=normalized_assignees,
                 due_date=due_date.milliseconds if due_date is not None else None,
@@ -638,7 +657,11 @@ class TaskService:
                 ) from exc
             raise
         try:
-            readback = self._client.get_task(task_id)
+            readback = (
+                self._client.get_task(task_id, include_markdown_description=True)
+                if markdown
+                else self._client.get_task(task_id)
+            )
         except ClickUpCLIError as exc:
             raise CreatedButUnverifiedError(
                 "Task was created but its readback failed; inspect it before retrying: " + str(exc),
@@ -651,6 +674,7 @@ class TaskService:
                 list_id=list_id,
                 name=normalized_name,
                 description=description,
+                description_format=description_format,
                 status=normalized_status,
                 assignees=normalized_assignees,
                 due_date=due_date,
@@ -664,6 +688,15 @@ class TaskService:
                 details={"task_id": task_id},
             ) from exc
         return readback
+
+    def verify_markdown_description(self, task_id: str, requested: str) -> JsonObject:
+        """Refresh Markdown after other task mutations without trusting plain text."""
+        task = self._client.get_task(task_id, include_markdown_description=True)
+        if str(task.get("id")) != task_id or not markdown_matches(
+            requested, task.get("markdown_description")
+        ):
+            raise VerificationError("Final Markdown description did not match")
+        return task
 
     def _apply_status(
         self,

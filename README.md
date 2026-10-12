@@ -1,8 +1,8 @@
 # clickup-cli
 
 `clickup-cli` provides deterministic ClickUp operations for people, scripts, and agents. Version
-0.3.0 adds first-class ClickUp Docs retrieval, verified authoring, and private Markdown/JSON text
-snapshots to hierarchy discovery, task operations, attachments, batch manifests, and time tracking.
+0.3.1 adds properly rendered, readback-verified Markdown task descriptions to ClickUp Docs,
+hierarchy discovery, task operations, attachments, batch manifests, and time tracking.
 The distribution is
 named `clickup-agent-cli`; the equivalent installed commands are `clickup` and `cu`.
 
@@ -40,8 +40,8 @@ different file with global `--env-file PATH` or `CLICKUP_ENV_FILE`; the process 
 The parser treats the file as data and does not execute or interpolate shell syntax. There is
 intentionally no `--token` option, keeping tokens out of command histories and process listings.
 
-Optional `~/.config/clickup-cli/config.toml` contains **no secrets**. Profiles select only an env
-file and an IANA timezone (relative env-file paths resolve against the config directory):
+Optional `~/.config/clickup-cli/config.toml` contains **no secrets**. Profiles select an env file,
+IANA timezone, and task description format (relative env-file paths resolve against the config directory):
 
 ```toml
 default_profile = "work"
@@ -49,6 +49,7 @@ default_profile = "work"
 [profiles.work]
 env_file = "work.env"
 timezone = "Europe/Zurich"
+description_format = "markdown"
 
 [profiles.personal]
 env_file = "personal.env"
@@ -60,6 +61,10 @@ CLI option > environment (`CLICKUP_ENV_FILE`, `CLICKUP_TIMEZONE`, `CLICKUP_PROFI
 profile > legacy defaults (env file above; UTC timezone). `CLICKUP_API_TOKEN` in the process
 always outranks the selected env file. Malformed config, unknown profiles, and invalid IANA
 timezones fail before network access. Keep tokens only in process environment or private env files.
+Task description format precedence is command `--description-format markdown|plain` >
+`CLICKUP_DESCRIPTION_FORMAT` > profile `description_format` > `plain`. Only the exact lowercase
+values are accepted; invalid configuration fails before network access. Description format is
+not a global option. An explicit `plain` option overrides a configured Markdown default.
 
 Direct requests default to `https://api.clickup.com/api`. `CLICKUP_API_BASE_URL` changes that root,
 and global `--base-url URL` takes precedence. A custom base ends at the API root; the client adds
@@ -322,9 +327,8 @@ clickup task create 'Collect evidence' --list-id '<list-id>' \
 `--description-file PATH` and `--description TEXT` are mutually exclusive for create and ensure.
 Files must be regular UTF-8 files no larger than 1 MiB; they are read before the create POST.
 The create POST contains only supplied task fields. A separate task read verifies the ID, List,
-name, and all supplied supported fields before success. Description readback permits stripped
-trailing padding and narrow Markdown-equivalent bullet/escaping changes, but not missing links
-or truncated content. Attachments are validated before the task
+name, and all supplied supported fields before success. Plain description readback keeps its existing narrow normalization behavior. Markdown mode
+compares content and rendered CommonMark structure, not flattened plain text. Attachments are validated before the task
 POST, uploaded serially only after task verification, and verified by returned ID and title on a
 fresh task read.
 
@@ -344,6 +348,37 @@ Non-idempotent partial outcomes are explicit:
 These errors are designed for callers to retain structured IDs and avoid duplicate creation.
 
 ## Task reads and mutations
+
+### Markdown task descriptions
+
+```console
+clickup task create 'Review brief' --list-id '<list-id>' \
+  --description-file ./brief.md --description-format markdown
+clickup task ensure 'Review brief' --list-id '<list-id>' \
+  --description '## Goal' --description-format markdown
+clickup task update '<task-id>' --description-file ./brief.md --description-format markdown
+clickup --json task show '<task-id>' --description-format markdown
+```
+
+Both description input options follow the same format policy. Markdown writes send only
+`markdown_content`; plain writes send only `description`. A format option without description
+input does not write a description. `task ensure` never reconciles an existing match's body or format.
+
+Markdown create/update verification explicitly requests `include_markdown_description=true` and
+requires the returned `markdown_description`. JSON keeps the existing plain `description` and
+additively exposes `markdown_description` when provided, plus `description_format: "markdown"`
+for Markdown description operations. Human `task show` displays the Markdown source when requested.
+Ordinary plain reads keep their previous HTTP query and output shape.
+
+Verification accepts equivalent Markdown presentation such as `- item` becoming `*   item`, CRLF,
+and stripped final newlines. ClickUp's automatic links for bare HTTP(S) URLs and email addresses
+are accepted only when both the visible text and destination remain exact; named links and code
+are not flattened. It rejects escaped or flattened headings/bold/lists, lost link URLs,
+changed code, and missing/truncated content. Equal raw/plain text alone cannot suppress a
+Markdown format repair; an identical second update is a no-op once the structured export matches.
+Logical empty and single-space descriptions clear via the single-space wire value in both formats.
+Batch descriptions remain plain regardless of the configured description format; batch Markdown
+schema support is not included. Verification uses CommonMark, not every ClickUp rich-text extension.
 
 Read task state, comments, and status with:
 

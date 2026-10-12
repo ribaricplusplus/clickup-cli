@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clickup-agent-cli"
-version = "0.3.0"
+version = "0.3.1"
 description = "Deterministic ClickUp operations for humans and agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,6 +24,7 @@ classifiers = [
 ]
 dependencies = [
   "httpx>=0.28.1,<1",
+  "markdown-it-py>=4,<5",
   "typer>=0.26.0,<0.27",
   "tzdata>=2025.2",
 ]

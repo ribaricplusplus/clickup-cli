@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 from clickup_cli.cli import app
 from clickup_cli.client import ClickUpClient
 from clickup_cli.config import resolve_base_url
+from clickup_cli.descriptions import markdown_matches
 from clickup_cli.domain import (
     list_statuses,
     parse_due_date,
@@ -57,6 +58,7 @@ def _invoke(
     result = runner.invoke(
         app,
         ["--base-url", base_url, "--json", *args],
+        env={"CLICKUP_DESCRIPTION_FORMAT": "plain"},
     )
     if result.exit_code != 0:
         error = _error_payload(result.stderr)
@@ -255,6 +257,135 @@ def test_live_sandbox_cli_lifecycle(tmp_path: Path) -> None:
             )
             assert ensured_again["created"] is False
             assert ensured_again["task"]["id"] == ensure_task_id
+
+            # Markdown resources are created in this run and use the same cleanup guards.
+            markdown_owner = OwnedTask(run_marker)
+            markdown_name = f"clickup-cli-live-markdown-{run_marker}"
+            markdown_description = (
+                f"## Goal {run_marker}\n\n**Bold** and `inline_code`.\n\n"
+                "- First item\n- Second item\n\n"
+                "[source](https://example.invalid/source)\n\n"
+                "Notes: https://example.invalid/notes\n\n> Quote\n"
+            )
+            markdown_file = tmp_path / f"clickup-cli-live-markdown-{run_marker}.md"
+            markdown_file.write_text(markdown_description, encoding="utf-8")
+            markdown_created = _invoke(
+                runner,
+                base_url,
+                "task",
+                "create",
+                markdown_name,
+                "--list-id",
+                list_id,
+                "--description-file",
+                str(markdown_file),
+                "--description-format",
+                "markdown",
+                owned_tasks=owned_tasks,
+                expected_task=markdown_owner,
+            )
+            markdown_task_id = str(markdown_created["task"]["id"])
+            owned_tasks[markdown_task_id] = markdown_owner
+            assert markdown_created["task"]["description_format"] == "markdown"
+            markdown_shown = _invoke(
+                runner,
+                base_url,
+                "task",
+                "show",
+                markdown_task_id,
+                "--description-format",
+                "markdown",
+            )
+            exported = markdown_shown["task"]["markdown_description"]
+            assert markdown_matches(markdown_description, exported)
+            assert f"## Goal {run_marker}" in exported
+            assert "**Bold**" in exported
+            assert "`inline_code`" in exported
+            assert "[source](https://example.invalid/source)" in exported
+            assert "> Quote" in exported
+            assert "*   First item" in exported or "- First item" in exported
+
+            markdown_updated_description = markdown_description.replace(
+                "First item", "Updated item"
+            )
+            markdown_updated = _invoke(
+                runner,
+                base_url,
+                "task",
+                "update",
+                markdown_task_id,
+                "--description",
+                markdown_updated_description,
+                "--description-format",
+                "markdown",
+            )
+            assert markdown_updated["changed"] is True
+            assert markdown_matches(
+                markdown_updated_description, markdown_updated["task"]["markdown_description"]
+            )
+            markdown_again = _invoke(
+                runner,
+                base_url,
+                "task",
+                "update",
+                markdown_task_id,
+                "--description",
+                markdown_updated_description,
+                "--description-format",
+                "markdown",
+            )
+            assert markdown_again["changed"] is False
+
+            # Equal raw/plain source is not equal Markdown rendering: repair, then no-op.
+            literal_heading = f"## Literal goal {run_marker}"
+            _invoke(
+                runner,
+                base_url,
+                "task",
+                "update",
+                ensure_task_id,
+                "--description",
+                literal_heading,
+                "--description-format",
+                "plain",
+            )
+            before_repair = _invoke(
+                runner,
+                base_url,
+                "task",
+                "show",
+                ensure_task_id,
+                "--description-format",
+                "markdown",
+            )
+            assert not markdown_matches(
+                literal_heading, before_repair["task"]["markdown_description"]
+            )
+            repaired = _invoke(
+                runner,
+                base_url,
+                "task",
+                "update",
+                ensure_task_id,
+                "--description",
+                literal_heading,
+                "--description-format",
+                "markdown",
+            )
+            assert repaired["changed"] is True
+            assert markdown_matches(literal_heading, repaired["task"]["markdown_description"])
+            repaired_again = _invoke(
+                runner,
+                base_url,
+                "task",
+                "update",
+                ensure_task_id,
+                "--description",
+                literal_heading,
+                "--description-format",
+                "markdown",
+            )
+            assert repaired_again["changed"] is False
 
             listed = _invoke(runner, base_url, "task", "list", "--list-id", list_id, "--all")
             assert any(task.get("id") == ensure_task_id for task in listed["tasks"])

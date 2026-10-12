@@ -5,6 +5,24 @@ Changelog, and the project intends to use Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-12
+
+### Added
+- Explicit `--description-format markdown|plain` for task create, ensure, update and show, with
+  token-free profile `description_format` and `CLICKUP_DESCRIPTION_FORMAT` overrides; plain remains
+  the default and batch descriptions remain plain.
+- Additive Markdown readback/format output, readable Markdown show output, exact localhost wire
+  contracts and scoped opt-in live lifecycle coverage without weakening cleanup ownership guards.
+
+### Fixed
+- Task Markdown writes now use the documented `markdown_content` field, not plain `description`.
+- Markdown verification checks CommonMark content and structure, accepts provider bullet spacing
+  and exact bare-URL/email autolinks,
+  and rejects escaped headings, lost bold/list structure, missing links, changed code and truncation.
+- Format-only repair no longer treats equal plain text as rendered Markdown; subsequent equivalent
+  updates are no-ops. Both formats handle logical empty/single-space clearing, and known create IDs
+  survive failed readbacks without blind POST retries.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added
@@ -100,7 +118,8 @@ Changelog, and the project intends to use Semantic Versioning.
 - Localhost HTTP contract tests, a separately gated live sandbox test, API provenance docs, and
   Python 3.11-3.13 CI for formatting, linting, typing, tests, and builds.
 
-[Unreleased]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ribaricplusplus/clickup-cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ribaricplusplus/clickup-cli/releases/tag/v0.1.0

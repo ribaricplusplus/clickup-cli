@@ -40,7 +40,11 @@ result and commit it. Do not include build artifacts.
 - Use ASCII punctuation in public files.
 
 Any HTTP behavior needs a localhost contract that asserts method, complete path/query, relevant
-headers, decoded JSON or multipart body, ordering, and response handling. Tests should prove unsafe
+headers, decoded JSON or multipart body, ordering, and response handling. Markdown contracts must
+preserve rendered structure, links and code; never accept escaped headings based on plain-source
+equality or blindly unescape. Keep `markdown_content` writes distinct from `markdown_description`
+exports, retain plain defaults, and do not make batch descriptions inherit a Markdown profile
+setting. Tests should prove unsafe
 input stops before network access and that partial failures retain the identifiers needed for safe
 inspection. Ordinary tests must never connect outside localhost or require credentials.
 

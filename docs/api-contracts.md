@@ -140,10 +140,41 @@ task creation.
 
 ## Task creation and mutation contracts
 
+### Markdown description provenance
+
+The current official Create Task, Update Task, and Get Task Markdown references were inspected
+on 2026-10-12: <https://developer.clickup.com/reference/createtask.md>,
+<https://developer.clickup.com/reference/updatetask.md>, and
+<https://developer.clickup.com/reference/gettask.md>. They embed OpenAPI 3.1.0, API info version
+2.0, and declare `updatedAt: 2026-07-01T21:22:52.000Z`. This is an endpoint-reference inspection,
+not a replacement or new checksum for the combined snapshot recorded above.
+
+POST and PUT use `markdown_content` for Markdown input, not the older overview's
+`markdown_description` write spelling. This client never sends both description wire fields.
+GET uses `?include_markdown_description=true` only when Markdown retrieval or verification is
+needed and reads `markdown_description` as the export. Plain-mode baseline GETs are unchanged.
+The profile/env/CLI format choice never changes batch description semantics.
+
+Dedicated sandbox probes supplied by the maintainer confirmed rendered headings, bold, inline
+code, links and quotes for POST/PUT, with Markdown GET exporting that structure. ClickUp changes
+`- First item` to `*   First item` and removes a final newline. A plain literal heading exports
+escaped, so equal plain source is insufficient for a Markdown no-op. Single-space Markdown input
+clears to empty plain and Markdown exports. Probe tasks were deleted and absence checked by the
+maintainer; no live account IDs or content are included here.
+
+Markdown verification compares a typed CommonMark token representation: structure, text, link
+attributes, code and quotes must match. Marker spelling, source positions, CRLF and terminal
+newlines may differ. Exact self-labelled HTTP(S)/mailto links added automatically by ClickUp
+normalize to the same text, but changed destinations, named-link loss and code changes never do.
+Escaped headings/bold/list markers, missing links, changed code and truncated
+content fail. Known create IDs survive failed Markdown readback/verification and POST is never
+blindly retried. An attachment-aware Markdown create refreshes and verifies Markdown again after
+attachment readbacks. Plain verification retains its existing compatibility behavior.
+
 | Operation | Exact write shape |
 | --- | --- |
-| Create task | `POST /api/v2/list/{list_id}/task` with `name` and only supplied `description`, `status`, `assignees`, `due_date`, `due_date_time`, and `tags` |
-| General task update | `PUT /api/v2/task/{task_id}` with only changed `name`, `description`, `priority`, `start_date`, `start_date_time`, or `archived` fields; logical empty description is wire `" "` |
+| Create task | `POST /api/v2/list/{list_id}/task` with `name` and only supplied `description` OR `markdown_content`, `status`, `assignees`, `due_date`, `due_date_time`, and `tags` |
+| General task update | `PUT /api/v2/task/{task_id}` with only changed `name`, `description` OR `markdown_content`, `priority`, `start_date`, `start_date_time`, or `archived` fields; logical empty description is wire `" "` |
 | Set status | `PUT /api/v2/task/{task_id}` with only `{"status":"<canonical label>"}` |
 | Set due date | `PUT /api/v2/task/{task_id}` with exact `due_date` milliseconds and `due_date_time` boolean |
 | Clear due date | `PUT /api/v2/task/{task_id}` with only `{"due_date":null}` |

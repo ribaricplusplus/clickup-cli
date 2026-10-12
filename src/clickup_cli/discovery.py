@@ -10,6 +10,7 @@ from typing import cast
 from zoneinfo import ZoneInfo
 
 from clickup_cli.client import ClickUpClient
+from clickup_cli.descriptions import validate_description_format
 from clickup_cli.domain import (
     DueDateInput,
     TaskService,
@@ -730,7 +731,9 @@ class DiscoveryService:
         assignees: list[int] | None,
         due_date: DueDateInput | None,
         tags: list[str] | None,
+        description_format: str = "plain",
     ) -> EnsureResult:
+        validate_description_format(description_format)
         native_list_id = validate_native_id(list_id, label="LIST_ID")
         normalized_name = name.strip()
         if not normalized_name:
@@ -779,13 +782,22 @@ class DiscoveryService:
             native_list_id,
             normalized_name,
             description=description,
+            description_format=description_format,
             status=normalized_status,
             assignees=normalized_assignees,
             due_date=due_date,
             tags=normalized_tags,
         )
         try:
-            summary = summarize_task(created, timezone=self._timezone)
+            summary = summarize_task(
+                created,
+                timezone=self._timezone,
+                description_format=(
+                    "markdown"
+                    if description_format == "markdown" and description is not None
+                    else None
+                ),
+            )
         except ClickUpCLIError as exc:
             raise CreatedButUnverifiedError(
                 "Task was created but local date normalization failed; inspect it before retrying: "
